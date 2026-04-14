@@ -119,6 +119,28 @@ struct Install: ParsableCommand {
 
         let executablePath = currentExecutablePath()
 
+        // The launchd plist is only useful if the binary it points at is
+        // runnable under AMFI. Bare CLI Mach-O binaries signed without an
+        // embedded provisioning profile get SIGKILLed at exec, so pointing
+        // launchd at one would produce a crash/respawn loop forever.
+        // Require the installing binary to live inside a .app bundle.
+        guard executablePath.contains(".app/Contents/MacOS/") else {
+            throw RuntimeError("""
+                paprika install must be run from a signed .app bundle.
+
+                Current executable:
+                  \(executablePath)
+
+                Expected layout:
+                  <some-path>/Paprika.app/Contents/MacOS/paprika
+
+                Build and sign the bundle first, then run install from inside it:
+                  swift build -c release
+                  ./scripts/codesign.sh
+                  .build/release/Paprika.app/Contents/MacOS/paprika install
+                """)
+        }
+
         // launchd does not expand ~ in StandardOutPath/StandardErrorPath,
         // so we have to write absolute paths into the plist.
         let logDir = home.appendingPathComponent("Library/Logs/paprika")
