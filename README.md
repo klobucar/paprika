@@ -31,46 +31,58 @@ Git commit signing is an excellent side benefit: because Paprika serves the same
 
 ---
 
-## Requirements
+## Status: pre-release
 
-- macOS 14+
-- A Mac with Secure Enclave (any Apple Silicon or Intel Mac with T2 chip)
-- A paid Apple Developer account for code signing (required to access the Secure Enclave)
+Paprika is **pre-0.1**. This repository is **source only**:
+
+- There is **no signed, notarized release binary** yet.
+- There is **no Homebrew tap**, no published tarball, no installer.
+- The code in `main` builds cleanly and the tests pass, but **running it on your own Mac requires signing and provisioning work** described below.
+
+The public distribution story (`brew install paprika` → notarized binary → everything just works) is on the roadmap, not shipped. Specifically, the remaining work is: request a Developer ID Application certificate, register an App ID on developer.apple.com, generate a Developer ID provisioning profile, wrap the binary in a `.app` bundle, notarize with `notarytool`, staple, publish to GitHub Releases, write a Homebrew formula.
+
+If you clone this today, treat it as a source-level preview and an exercise in how SE-backed SSH agents get built on macOS. If you want to help with the release pipeline, that's an excellent contribution area — open an issue.
 
 ---
 
-## Installation
+## Requirements
 
-### Build from source
+- macOS 14+
+- A Mac with Secure Enclave (any Apple Silicon Mac, or Intel Mac with T2 chip)
+- A **paid Apple Developer account** — not optional. Secure Enclave keychain access requires a stable team identifier baked into the code signature, and macOS enforces this with AMFI at process exec time. Ad-hoc signing (`codesign --sign -`) will fail with `errSecMissingEntitlement`; `Apple Development` cert + bare `codesign` will be SIGKILLed at launch.
 
-```bash
-git clone https://github.com/klobucar/paprika.git
-cd paprika
-swift build -c release
-```
+---
 
-After building, sign the binary with the provided entitlements. The Secure Enclave is inaccessible without this step:
+## Installation (building from source)
 
-```bash
-codesign --force --sign - --entitlements entitlements.plist .build/release/paprika
-```
+### The short story
 
-For production use, sign with your Developer ID instead of `-` (ad-hoc):
+macOS's Secure Enclave access rules are strict: to create and use persistent SE keys, the binary must be code-signed **and** accompanied by a provisioning profile that authorizes the `keychain-access-groups` entitlement. For a bare command-line Mach-O binary, this means wrapping it in a minimal `.app` bundle and embedding the profile at `Contents/embedded.provisionprofile`.
 
-```bash
-codesign --force --sign "Developer ID Application: Your Name (TEAMID)" \
-  --entitlements entitlements.plist \
-  .build/release/paprika
-```
+### One-time setup
+
+1. Clone and build:
+
+   ```bash
+   git clone https://github.com/klobucar/paprika.git
+   cd paprika
+   swift build -c release
+   ```
+
+2. In Xcode, create a throwaway macOS **App** target with bundle identifier `com.paprika.agent`, set the signing team to your Apple Developer team, and enable the **Keychain Sharing** capability. Build it once (⌘B). Xcode will register the App ID on developer.apple.com and generate a **Mac Team Provisioning Profile** containing `keychain-access-groups = <teamid>.*`. The profile lands at `~/Library/Developer/Xcode/UserData/Provisioning Profiles/<uuid>.provisionprofile`.
+
+3. Wrap the built binary into a bundle, embed the profile, sign with Apple Development cert + the four required entitlements (`com.apple.application-identifier`, `com.apple.developer.team-identifier`, `keychain-access-groups`, `com.apple.security.get-task-allow`), and test. See `scripts/codesign.sh` in the repo history for a working example — it's not committed because it's inherently team-specific, but it documents the exact invocation.
+
+4. The resulting `Paprika.app/Contents/MacOS/paprika` will run locally on your Mac. It will not run on other Macs because the provisioning profile is limited to devices registered in your development team. For distribution across Macs, the roadmap (Developer ID + notarization) applies.
 
 ### Install as a background agent
 
 ```bash
-# Copy binary to a permanent location first, then:
-.build/release/paprika install
+# After signing Paprika.app, point launchd at the inner binary:
+.build/release/Paprika.app/Contents/MacOS/paprika install
 
 # Load immediately (also runs at login via launchd)
-launchctl load ~/Library/LaunchAgents/com.paprika.agent.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.paprika.agent.plist
 ```
 
 Add to your shell profile (`.zshrc`, `.bashrc`, etc.):
@@ -93,7 +105,7 @@ paprika generate prod-bastion
 paprika generate work-laptop
 ```
 
-Touch ID will prompt once. The private key is created inside the Secure Enclave and is permanently non-extractable — it cannot be copied, backed up, or exported.
+The private key is created inside the Secure Enclave and is permanently non-extractable — it cannot be copied, backed up, or exported. Key **generation** does not prompt Touch ID (the SE only records the access-control policy); Touch ID is required for every key **use** (signing), which you'll see the first time `ssh` or `git commit -S` reaches for the agent.
 
 ### 2. Copy the public key somewhere useful
 
