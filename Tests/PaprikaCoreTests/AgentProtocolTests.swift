@@ -191,6 +191,72 @@ final class AgentProtocolTests: XCTestCase {
     }
 }
 
+final class AuditLogTests: XCTestCase {
+    func testAppendAndChain() throws {
+        let path = URL(fileURLWithPath: "/tmp/paprika-audit-\(UUID().uuidString.prefix(8)).log")
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let log = AuditLog(path: path)
+        log.record(keyName: "test", data: Data("first".utf8), context: "ctx one")
+        log.record(keyName: "test", data: Data("second".utf8), context: "ctx two")
+        log.record(keyName: "test", data: Data("third".utf8), context: "ctx three")
+
+        let entries = log.readAll()
+        let rawLines = log.readRawLines()
+        XCTAssertEqual(entries.count, 3)
+        XCTAssertEqual(rawLines.count, 3)
+
+        XCTAssertEqual(entries[0].key, "test")
+        XCTAssertEqual(entries[0].context, "ctx one")
+        XCTAssertEqual(entries[1].context, "ctx two")
+        XCTAssertEqual(entries[2].context, "ctx three")
+
+        // Verify the hash chain: each entry's prev_sha256 should equal
+        // SHA256(previous line's raw bytes without the trailing \n).
+        func sha256Hex(_ s: String) -> String {
+            SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+
+        XCTAssertEqual(entries[0].prev_sha256, sha256Hex(""),
+                       "first entry should anchor to SHA256(empty)")
+        XCTAssertEqual(entries[1].prev_sha256, sha256Hex(rawLines[0]),
+                       "second entry should back-link to sha256 of line 1")
+        XCTAssertEqual(entries[2].prev_sha256, sha256Hex(rawLines[1]),
+                       "third entry should back-link to sha256 of line 2")
+    }
+
+    func testSpecialCharactersInContextRoundTrip() throws {
+        let path = URL(fileURLWithPath: "/tmp/paprika-audit-\(UUID().uuidString.prefix(8)).log")
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let log = AuditLog(path: path)
+        // JSON encoding handles tabs, newlines, quotes, backslashes,
+        // and unicode natively — no sanitization needed on our side.
+        // Round-trip must preserve the exact original context.
+        let gnarly = "evil\tctx\nwith\"quotes\\and\r\nnewlines\u{1F600}"
+        log.record(keyName: "k", data: Data("x".utf8), context: gnarly)
+
+        let entries = log.readAll()
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].context, gnarly,
+                       "JSON escaping should round-trip special characters losslessly")
+    }
+
+    func testRawLinesAreValidJSON() throws {
+        let path = URL(fileURLWithPath: "/tmp/paprika-audit-\(UUID().uuidString.prefix(8)).log")
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let log = AuditLog(path: path)
+        log.record(keyName: "k", data: Data("x".utf8), context: "c")
+
+        let rawLines = log.readRawLines()
+        XCTAssertEqual(rawLines.count, 1)
+        // Should parse as JSON
+        let parsed = try JSONSerialization.jsonObject(with: Data(rawLines[0].utf8))
+        XCTAssertTrue(parsed is [String: Any])
+    }
+}
+
 final class SignContextParserTests: XCTestCase {
     func testSSHSIGGitNamespace() {
         // SSHSIG magic + version(1) + namespace("git") + reserved("") + ...

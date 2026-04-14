@@ -29,6 +29,10 @@ public class AgentServer {
     // tell which one they're approving. All signing goes through here.
     private let signQueue = DispatchQueue(label: "com.paprika.agent.sign")
 
+    /// Append-only audit log at ~/Library/Logs/paprika/signatures.log.
+    /// Records every successful sign. Created lazily at first use.
+    private let auditLog = AuditLog.default()
+
     public init(socketPath: String, keyManager: KeyManager) {
         self.socketPath = socketPath
         self.keyManager = keyManager
@@ -239,6 +243,10 @@ public class AgentServer {
             sendFailure(connection: connection)
             return
         }
+
+        // Only audit on success — a denied Touch ID prompt throws above
+        // and we don't want to record "something tried to sign X."
+        auditLog.record(keyName: keyName, data: dataToSign, context: reason)
 
         guard let ecdsaSig = try? P256.Signing.ECDSASignature(derRepresentation: signature) else {
             logger.error("failed to parse ECDSA signature")
