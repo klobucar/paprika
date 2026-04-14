@@ -3,6 +3,7 @@ import ArgumentParser
 import Foundation
 import CryptoKit
 import Security
+import Darwin
 
 @main
 struct Paprika: ParsableCommand {
@@ -15,6 +16,21 @@ struct Paprika: ParsableCommand {
 struct RuntimeError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
+}
+
+// Returns the absolute path of the currently running binary, resolving
+// symlinks so launchd records a stable location.
+// Bundle.main.executableURL is always nil for SPM CLI binaries, so we
+// use _NSGetExecutablePath — the canonical Darwin syscall for this.
+private func currentExecutablePath() -> String {
+    var size: UInt32 = 0
+    _ = _NSGetExecutablePath(nil, &size)
+    var buffer = [CChar](repeating: 0, count: Int(size))
+    guard _NSGetExecutablePath(&buffer, &size) == 0 else {
+        return CommandLine.arguments[0]
+    }
+    let raw = String(cString: buffer)
+    return (try? FileManager.default.destinationOfSymbolicLink(atPath: raw)) ?? raw
 }
 
 struct Generate: ParsableCommand {
@@ -67,8 +83,8 @@ struct Install: ParsableCommand {
         let plistCacheURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/\(label).plist")
         
-        let executableURL = Bundle.main.executableURL!
-        
+        let executablePath = currentExecutablePath()
+
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,7 +94,7 @@ struct Install: ParsableCommand {
             <string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(executableURL.path)</string>
+                <string>\(executablePath)</string>
                 <string>serve</string>
             </array>
             <key>RunAtLoad</key>
@@ -95,7 +111,7 @@ struct Install: ParsableCommand {
         
         try plist.write(to: plistCacheURL, atomically: true, encoding: .utf8)
         print("Installed launchd agent to \(plistCacheURL.path)")
-        print("Executable path: \(executableURL.path)")
+        print("Executable path: \(executablePath)")
         print("To load now: launchctl load \(plistCacheURL.path)")
     }
 }
