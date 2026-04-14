@@ -19,10 +19,15 @@ open class KeyManager {
     open func generateKey(name: String) throws -> SecKey {
         let tag = (Self.tagPrefix + name).data(using: .utf8)!
         
+        // biometryCurrentSet (vs. biometryAny) invalidates the key if the
+        // enrolled Touch ID fingerprint set changes after key creation.
+        // This blocks the "attacker with brief physical access enrolls a
+        // new fingerprint" attack, at the cost of requiring users to
+        // re-generate keys after any Touch ID re-enrollment.
         guard let accessControl = SecAccessControlCreateWithFlags(
             kCFAllocatorDefault,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.privateKeyUsage, .biometryAny], 
+            [.privateKeyUsage, .biometryCurrentSet],
             nil
         ) else {
             throw KeyManagerError.generationFailed("Could not create access control")
