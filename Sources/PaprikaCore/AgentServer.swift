@@ -30,6 +30,13 @@ public class AgentServer {
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                // Restrict the socket to owner-only. File system permissions
+                // are our peer-auth fence: only the process owner can
+                // connect(2) to a 0600 Unix socket.
+                if chmod(self.socketPath, 0o600) != 0 {
+                    let err = String(cString: strerror(errno))
+                    print("Warning: could not chmod socket to 0600: \(err)")
+                }
                 print("Agent listening on \(self.socketPath)")
             case .failed(let error):
                 print("Agent listener failed: \(error)")

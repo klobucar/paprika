@@ -64,6 +64,20 @@ struct Serve: ParsableCommand {
             try FileManager.default.createDirectory(at: socketDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
         }
 
+        // Always re-enforce owner-only perms. A stale ~/.paprika from an
+        // earlier install (or a hostile drop) could be world-readable,
+        // which would expose the socket to every local user.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: socketDir.path)
+
+        // Refuse to run if ~/.paprika is not owned by the current user.
+        let attrs = try FileManager.default.attributesOfItem(atPath: socketDir.path)
+        let ownerID = attrs[.ownerAccountID] as? UInt ?? 0
+        guard ownerID == UInt(getuid()) else {
+            throw RuntimeError("\(socketDir.path) is not owned by uid \(getuid()); refusing to start")
+        }
+
         let socketPath = socketDir.appendingPathComponent("agent.sock").path
 
         let keyManager = KeyManager()
