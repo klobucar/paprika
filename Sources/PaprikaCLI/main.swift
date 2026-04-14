@@ -263,7 +263,12 @@ struct GitSetup: ParsableCommand {
         
         print("Configuring Git...")
         try runGit(args: configScope + ["config", "gpg.format", "ssh"])
-        try runGit(args: configScope + ["config", "user.signingkey", pubKeyString])
+        // Modern git treats user.signingkey as a filesystem path unless
+        // it's prefixed with key::, in which case the remainder is read
+        // as a literal SSH public key line. Paprika keys live inside the
+        // Secure Enclave and have no on-disk .pub file, so the literal
+        // form is the only one that works.
+        try runGit(args: configScope + ["config", "user.signingkey", "key::\(pubKeyString)"])
 
         if addToAllowed {
             try setupAllowedSigners(pubKeyString: pubKeyString)
