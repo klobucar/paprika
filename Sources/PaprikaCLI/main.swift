@@ -36,8 +36,9 @@ private func currentExecutablePath() -> String {
 struct Generate: ParsableCommand {
     @Argument(help: "Name of the key")
     var name: String
-    
+
     func run() throws {
+        try CodeSignatureCheck.requireTeamIdentifier()
         let keyManager = KeyManager()
         _ = try keyManager.generateKey(name: name)
         print("Key '\(name)' generated successfully.")
@@ -47,8 +48,9 @@ struct Generate: ParsableCommand {
 struct Delete: ParsableCommand {
     @Argument(help: "Name of the key")
     var name: String
-    
+
     func run() throws {
+        try CodeSignatureCheck.requireTeamIdentifier()
         let keyManager = KeyManager()
         try keyManager.deleteKey(name: name)
         print("Key '\(name)' deleted.")
@@ -57,6 +59,8 @@ struct Delete: ParsableCommand {
 
 struct Serve: ParsableCommand {
     func run() throws {
+        try CodeSignatureCheck.requireTeamIdentifier()
+
         let socketDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".paprika")
 
         // Ensure directory exists
