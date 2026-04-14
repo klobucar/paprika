@@ -2,6 +2,15 @@ import Foundation
 import Network
 import CryptoKit
 import Security
+import os
+
+// All daemon diagnostics flow through the macOS unified log system.
+// Rotation, redaction, and subsystem-level filtering are handled by the
+// OS; users can tail the log with:
+//   log stream --predicate 'subsystem == "com.paprika.agent"'
+// or query historical events with:
+//   log show --predicate 'subsystem == "com.paprika.agent"' --last 1h
+private let logger = Logger(subsystem: "com.paprika.agent", category: "server")
 
 public class AgentServer {
     // SSH agent protocol caps messages around 256 KB. Anything larger is
@@ -35,11 +44,11 @@ public class AgentServer {
                 // connect(2) to a 0600 Unix socket.
                 if chmod(self.socketPath, 0o600) != 0 {
                     let err = String(cString: strerror(errno))
-                    print("Warning: could not chmod socket to 0600: \(err)")
+                    logger.warning("could not chmod socket to 0600: \(err, privacy: .public)")
                 }
-                print("Agent listening on \(self.socketPath)")
+                logger.info("agent listening on \(self.socketPath, privacy: .public)")
             case .failed(let error):
-                print("Agent listener failed: \(error)")
+                logger.error("listener failed: \(error.localizedDescription, privacy: .public)")
                 exit(1)
             default: break
             }
@@ -64,23 +73,23 @@ public class AgentServer {
                  return
             }
             if let error = error {
-                print("Connection error: \(error)")
+                logger.error("connection error: \(error.localizedDescription, privacy: .public)")
                 connection.cancel()
                 return
             }
-            
+
             guard let content = content, content.count == 4 else { return }
             let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
 
             guard length > 0 && length <= AgentServer.maxMessageLength else {
-                print("Rejecting oversized agent message: \(length) bytes (max \(AgentServer.maxMessageLength))")
+                logger.warning("rejecting oversized agent message: \(length) bytes (max \(AgentServer.maxMessageLength))")
                 connection.cancel()
                 return
             }
 
             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { body, _, _, error in
                 if let error = error {
-                    print("Read body error: \(error)")
+                    logger.error("read body error: \(error.localizedDescription, privacy: .public)")
                     connection.cancel()
                     return
                 }
@@ -111,7 +120,7 @@ public class AgentServer {
                 sendFailure(connection: connection)
             }
         } catch {
-            print("Protocol error: \(error)")
+            logger.error("protocol error: \(error.localizedDescription, privacy: .public)")
             sendFailure(connection: connection)
         }
     }
@@ -128,7 +137,7 @@ public class AgentServer {
         
         connection.send(content: writer.data, completion: .contentProcessed { error in
             if let error = error {
-                print("Send error: \(error)")
+                logger.error("send error: \(error.localizedDescription, privacy: .public)")
             }
         })
     }
@@ -201,7 +210,7 @@ public class AgentServer {
         do {
             signature = try keyManager.sign(data: dataToSign, keyName: keyName)
         } catch {
-            print("Signing error: \(error)")
+            logger.error("signing error: \(error.localizedDescription, privacy: .public)")
             sendFailure(connection: connection)
             return
         }

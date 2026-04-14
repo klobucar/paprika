@@ -195,9 +195,17 @@ Paprika does **not** protect against:
 
 ## Logs
 
-```
-~/Library/Logs/paprika/paprika.log   # stdout
-~/Library/Logs/paprika/paprika.err   # stderr
+Paprika routes daemon diagnostics through the macOS unified log system (subsystem `com.paprika.agent`). Automatic rotation, privacy redaction, and rich filtering are handled by the OS.
+
+```bash
+# Live-tail the daemon (like `tail -f`):
+log stream --predicate 'subsystem == "com.paprika.agent"'
+
+# Historical events from the last hour:
+log show --predicate 'subsystem == "com.paprika.agent"' --last 1h
+
+# Only errors:
+log show --predicate 'subsystem == "com.paprika.agent" && messageType == error' --last 24h
 ```
 
 ---

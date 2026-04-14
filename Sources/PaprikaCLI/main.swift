@@ -141,14 +141,6 @@ struct Install: ParsableCommand {
                 """)
         }
 
-        // launchd does not expand ~ in StandardOutPath/StandardErrorPath,
-        // so we have to write absolute paths into the plist.
-        let logDir = home.appendingPathComponent("Library/Logs/paprika")
-        try FileManager.default.createDirectory(
-            at: logDir, withIntermediateDirectories: true)
-        let logPath = logDir.appendingPathComponent("paprika.log").path
-        let errPath = logDir.appendingPathComponent("paprika.err").path
-
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -174,10 +166,6 @@ struct Install: ParsableCommand {
             </dict>
             <key>ThrottleInterval</key>
             <integer>10</integer>
-            <key>StandardOutPath</key>
-            <string>\(logPath)</string>
-            <key>StandardErrorPath</key>
-            <string>\(errPath)</string>
         </dict>
         </plist>
         """
@@ -185,10 +173,12 @@ struct Install: ParsableCommand {
         try plist.write(to: plistCacheURL, atomically: true, encoding: .utf8)
         print("Installed launchd agent to \(plistCacheURL.path)")
         print("Executable path: \(executablePath)")
-        print("Logs: \(logDir.path)")
         print("")
         print("Load the agent (this session and every login):")
         print("  launchctl bootstrap gui/$UID \(plistCacheURL.path)")
+        print("")
+        print("Tail the daemon log:")
+        print("  log stream --predicate 'subsystem == \"com.paprika.agent\"'")
         print("")
         print("Stop and remove:")
         print("  paprika uninstall")
