@@ -80,10 +80,19 @@ struct Serve: ParsableCommand {
 struct Install: ParsableCommand {
     func run() throws {
         let label = "com.paprika.agent"
-        let plistCacheURL = FileManager.default.homeDirectoryForCurrentUser
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let plistCacheURL = home
             .appendingPathComponent("Library/LaunchAgents/\(label).plist")
-        
+
         let executablePath = currentExecutablePath()
+
+        // launchd does not expand ~ in StandardOutPath/StandardErrorPath,
+        // so we have to write absolute paths into the plist.
+        let logDir = home.appendingPathComponent("Library/Logs/paprika")
+        try FileManager.default.createDirectory(
+            at: logDir, withIntermediateDirectories: true)
+        let logPath = logDir.appendingPathComponent("paprika.log").path
+        let errPath = logDir.appendingPathComponent("paprika.err").path
 
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -102,16 +111,17 @@ struct Install: ParsableCommand {
             <key>KeepAlive</key>
             <true/>
             <key>StandardOutPath</key>
-            <string>/tmp/paprika.log</string>
+            <string>\(logPath)</string>
             <key>StandardErrorPath</key>
-            <string>/tmp/paprika.err</string>
+            <string>\(errPath)</string>
         </dict>
         </plist>
         """
-        
+
         try plist.write(to: plistCacheURL, atomically: true, encoding: .utf8)
         print("Installed launchd agent to \(plistCacheURL.path)")
         print("Executable path: \(executablePath)")
+        print("Logs: \(logDir.path)")
         print("To load now: launchctl load \(plistCacheURL.path)")
     }
 }
