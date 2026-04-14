@@ -9,7 +9,7 @@ import Darwin
 struct Paprika: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Secure Enclave SSH Agent",
-        subcommands: [Generate.self, Delete.self, Serve.self, Install.self, Show.self, GitSetup.self]
+        subcommands: [Generate.self, Delete.self, Serve.self, Install.self, Uninstall.self, Show.self, GitSetup.self]
     )
 }
 
@@ -192,6 +192,46 @@ struct Install: ParsableCommand {
         print("")
         print("Stop and remove:")
         print("  paprika uninstall")
+    }
+}
+
+struct Uninstall: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Stop the launchd agent and remove its plist"
+    )
+
+    func run() throws {
+        let label = "com.paprika.agent"
+        let plistURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+
+        // Bootout the service if it's currently loaded. We ignore any
+        // error here because a common case is "plist exists on disk but
+        // isn't loaded in launchd" — bootout returns non-zero for that,
+        // but we still want to clean up the plist file.
+        let uid = getuid()
+        let target = "gui/\(uid)/\(label)"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["bootout", target]
+        process.standardError = Pipe()  // swallow "Service not found" noise
+        process.standardOutput = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        if process.terminationStatus == 0 {
+            print("Stopped \(target)")
+        }
+
+        if FileManager.default.fileExists(atPath: plistURL.path) {
+            try FileManager.default.removeItem(at: plistURL)
+            print("Removed \(plistURL.path)")
+        } else {
+            print("No plist at \(plistURL.path) (already uninstalled?)")
+        }
+
+        print("")
+        print("Note: Secure Enclave keys are NOT deleted by uninstall.")
+        print("To destroy a key permanently, use:  paprika delete <name>")
     }
 }
 
