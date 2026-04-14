@@ -186,7 +186,12 @@ struct Install: ParsableCommand {
         print("Installed launchd agent to \(plistCacheURL.path)")
         print("Executable path: \(executablePath)")
         print("Logs: \(logDir.path)")
-        print("To load now: launchctl load \(plistCacheURL.path)")
+        print("")
+        print("Load the agent (this session and every login):")
+        print("  launchctl bootstrap gui/$UID \(plistCacheURL.path)")
+        print("")
+        print("Stop and remove:")
+        print("  paprika uninstall")
     }
 }
 
