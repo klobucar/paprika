@@ -4,10 +4,15 @@ import CryptoKit
 import Security
 
 public class AgentServer {
+    // SSH agent protocol caps messages around 256 KB. Anything larger is
+    // spec-violating and, left unbounded, lets a local client force the
+    // network stack to buffer gigabytes before delivery — a trivial DoS.
+    public static let maxMessageLength: UInt32 = 256 * 1024
+
     public let socketPath: String
     public let keyManager: KeyManager
     public var listener: NWListener?
-    
+
     public init(socketPath: String, keyManager: KeyManager) {
         self.socketPath = socketPath
         self.keyManager = keyManager
@@ -59,7 +64,13 @@ public class AgentServer {
             
             guard let content = content, content.count == 4 else { return }
             let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            
+
+            guard length > 0 && length <= AgentServer.maxMessageLength else {
+                print("Rejecting oversized agent message: \(length) bytes (max \(AgentServer.maxMessageLength))")
+                connection.cancel()
+                return
+            }
+
             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { body, _, _, error in
                 if let error = error {
                     print("Read body error: \(error)")
