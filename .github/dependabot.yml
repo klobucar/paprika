@@ -1,0 +1,17 @@
+version: 2
+
+# Keep SHA-pinned GitHub Actions fresh. Dependabot parses the trailing
+# `# vX.Y.Z` comment on each `uses:` line and opens PRs that update
+# both the commit SHA and the comment when a new version ships.
+#
+# SHA-pinning gives us supply-chain security (tags can be moved, SHAs
+# can't) without the cost of manually chasing releases.
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
