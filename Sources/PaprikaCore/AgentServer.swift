@@ -258,8 +258,8 @@ public class AgentServer {
         let s = raw.subdata(in: 32..<64)
 
         var innerWriter = SSHWriter()
-        writeMpint(r, to: &innerWriter)
-        writeMpint(s, to: &innerWriter)
+        AgentServer.writeMpint(r, to: &innerWriter)
+        AgentServer.writeMpint(s, to: &innerWriter)
 
         var sigWriter = SSHWriter()
         sigWriter.write("ecdsa-sha2-nistp256")
@@ -329,7 +329,7 @@ public class AgentServer {
         return "Paprika: authorize SSH signing"
     }
 
-    private func writeMpint(_ value: Data, to writer: inout SSHWriter) {
+    internal static func writeMpint(_ value: Data, to writer: inout SSHWriter) {
         var data = value
         while data.first == 0 && data.count > 1 {
             data = data.dropFirst()

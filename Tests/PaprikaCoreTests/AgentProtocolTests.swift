@@ -255,6 +255,47 @@ final class AuditLogTests: XCTestCase {
         let parsed = try JSONSerialization.jsonObject(with: Data(rawLines[0].utf8))
         XCTAssertTrue(parsed is [String: Any])
     }
+
+    func testConcurrentWritesAreSerializedAndChained() throws {
+        let path = URL(fileURLWithPath: "/tmp/paprika-audit-\(UUID().uuidString.prefix(8)).log")
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        let log = AuditLog(path: path)
+
+        // Dispatch 20 record calls across 4 concurrent writer threads.
+        // AuditLog's internal serial queue should keep them ordered and
+        // each entry's prev_sha256 should chain to the previous line.
+        let group = DispatchGroup()
+        for i in 0..<20 {
+            DispatchQueue.global().async(group: group) {
+                log.record(
+                    keyName: "test",
+                    data: Data("payload-\(i)".utf8),
+                    context: "ctx \(i)"
+                )
+            }
+        }
+        group.wait()
+
+        let entries = log.readAll()
+        let rawLines = log.readRawLines()
+        XCTAssertEqual(entries.count, 20, "all 20 concurrent writes should have landed")
+        XCTAssertEqual(rawLines.count, 20)
+
+        // Verify the chain is intact top-to-bottom. Each line's
+        // prev_sha256 must equal sha256(previous raw line bytes), or
+        // sha256("") for the first entry.
+        func sha256Hex(_ s: String) -> String {
+            SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        let emptyHash = sha256Hex("")
+        XCTAssertEqual(entries[0].prev_sha256, emptyHash)
+        for i in 1..<entries.count {
+            XCTAssertEqual(
+                entries[i].prev_sha256, sha256Hex(rawLines[i - 1]),
+                "chain break at entry \(i)")
+        }
+    }
 }
 
 final class SignContextParserTests: XCTestCase {
@@ -307,5 +348,287 @@ final class SignContextParserTests: XCTestCase {
     func testUnknownPayloadFallback() {
         let reason = AgentServer.signContextDescription(for: Data([0xFF, 0xFE, 0xFD]))
         XCTAssertEqual(reason, "Paprika: authorize SSH signing")
+    }
+
+    func testSSHAuthTruncatedInput() {
+        // Starts looking like an SSH publickey auth request (length-prefixed
+        // session id + byte 50) but is cut off before username/service are
+        // readable. Should fall back cleanly, not crash.
+        var blob = SSHWriter()
+        blob.write(Data(repeating: 0xAB, count: 32))  // session id
+        blob.write(UInt8(50))                         // SSH_MSG_USERAUTH_REQUEST
+        // ...and nothing else. Parser should give up and return the generic.
+
+        let reason = AgentServer.signContextDescription(for: blob.data)
+        XCTAssertEqual(reason, "Paprika: authorize SSH signing")
+    }
+
+    func testSSHAuthWrongMethod() {
+        // All fields present but method is "password" instead of "publickey".
+        // We only understand publickey signing; anything else should fall back.
+        var blob = SSHWriter()
+        blob.write(Data(repeating: 0x01, count: 32))
+        blob.write(UInt8(50))
+        blob.write("klobucar")
+        blob.write("ssh-connection")
+        blob.write("password")                        // wrong method
+        blob.write(UInt8(1))
+        blob.write("ecdsa-sha2-nistp256")
+        blob.write(Data([0x04]))
+
+        let reason = AgentServer.signContextDescription(for: blob.data)
+        XCTAssertEqual(reason, "Paprika: authorize SSH signing")
+    }
+}
+
+final class SSHWireProtocolTests: XCTestCase {
+    func testReadByteRoundTrip() throws {
+        var w = SSHWriter()
+        w.write(UInt8(0x42))
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readByte(), 0x42)
+    }
+
+    func testReadUInt32RoundTrip() throws {
+        var w = SSHWriter()
+        w.write(UInt32(0x12345678))
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readUInt32(), 0x12345678)
+    }
+
+    func testReadStringRoundTrip() throws {
+        var w = SSHWriter()
+        w.write("hello world")
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readString(), "hello world")
+    }
+
+    func testReadDataRoundTrip() throws {
+        let original = Data([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01])
+        var w = SSHWriter()
+        w.write(original)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), original)
+    }
+
+    func testReadEmptyString() throws {
+        var w = SSHWriter()
+        w.write("")                     // length=0 then no bytes
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readString(), "")
+    }
+
+    func testReadEmptyData() throws {
+        var w = SSHWriter()
+        w.write(Data())                 // length=0 then no bytes
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data())
+    }
+
+    func testReadBeyondEndThrows() {
+        // length prefix claims 100 bytes, but only 4 bytes of body follow.
+        var buf = Data()
+        buf.append(contentsOf: [0x00, 0x00, 0x00, 0x64])   // uint32 100 BE
+        buf.append(contentsOf: [0xAA, 0xBB, 0xCC, 0xDD])   // only 4 bytes
+        var r = SSHReader(data: buf)
+        XCTAssertThrowsError(try r.readData()) { error in
+            guard let ssh = error as? SSHError else {
+                XCTFail("wrong error type: \(error)")
+                return
+            }
+            XCTAssertEqual(ssh, .notEnoughData)
+        }
+    }
+
+    func testReadByteAtEndThrows() {
+        var r = SSHReader(data: Data())
+        XCTAssertThrowsError(try r.readByte())
+    }
+
+    func testReadInvalidUTF8Throws() {
+        // Length prefix = 3, bytes = 0xFF 0xFE 0xFD (invalid UTF-8)
+        var buf = Data()
+        buf.append(contentsOf: [0x00, 0x00, 0x00, 0x03])
+        buf.append(contentsOf: [0xFF, 0xFE, 0xFD])
+        var r = SSHReader(data: buf)
+        XCTAssertThrowsError(try r.readString()) { error in
+            guard let ssh = error as? SSHError else {
+                XCTFail("wrong error type: \(error)")
+                return
+            }
+            XCTAssertEqual(ssh, .invalidString)
+        }
+    }
+
+    func testComplexRoundTrip() throws {
+        // Mix of types in sequence, like a real SSH message body
+        var w = SSHWriter()
+        w.write(UInt8(13))               // message type
+        w.write("key-name")              // string
+        w.write(UInt32(42))              // flags
+        w.write(Data([0x01, 0x02]))      // data blob
+        w.write("")                      // empty string
+
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readByte(), 13)
+        XCTAssertEqual(try r.readString(), "key-name")
+        XCTAssertEqual(try r.readUInt32(), 42)
+        XCTAssertEqual(try r.readData(), Data([0x01, 0x02]))
+        XCTAssertEqual(try r.readString(), "")
+    }
+}
+
+final class MpintTests: XCTestCase {
+    func testNormalValue() {
+        var w = SSHWriter()
+        // Value 0x010203 — no leading zeros, top bit clear
+        AgentServer.writeMpint(Data([0x01, 0x02, 0x03]), to: &w)
+        var r = SSHReader(data: w.data)
+        let bytes = try? r.readData()
+        XCTAssertEqual(bytes, Data([0x01, 0x02, 0x03]))
+    }
+
+    func testLeadingZerosStripped() {
+        var w = SSHWriter()
+        // 00 00 01 02 should collapse to 01 02
+        AgentServer.writeMpint(Data([0x00, 0x00, 0x01, 0x02]), to: &w)
+        var r = SSHReader(data: w.data)
+        let bytes = try? r.readData()
+        XCTAssertEqual(bytes, Data([0x01, 0x02]))
+    }
+
+    func testHighBitSetGetsSignByte() {
+        var w = SSHWriter()
+        // 80 01 has the high bit set; mpint would misread as negative
+        // without a leading zero byte, so writer should prepend one.
+        AgentServer.writeMpint(Data([0x80, 0x01]), to: &w)
+        var r = SSHReader(data: w.data)
+        let bytes = try? r.readData()
+        XCTAssertEqual(bytes, Data([0x00, 0x80, 0x01]))
+    }
+
+    func testZeroValue() {
+        var w = SSHWriter()
+        // Single zero byte — the "strip leading zeros while > 1 byte"
+        // rule preserves this as a single 0x00.
+        AgentServer.writeMpint(Data([0x00]), to: &w)
+        var r = SSHReader(data: w.data)
+        let bytes = try? r.readData()
+        XCTAssertEqual(bytes, Data([0x00]))
+    }
+}
+
+final class ProtocolDefenseTests: XCTestCase {
+    func testOversizedLengthCloses() throws {
+        let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        try server.start()
+        defer { server.listener?.cancel() }
+
+        let expectation = self.expectation(description: "Connection closed")
+
+        let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                // Send a 4-byte header claiming maxMessageLength + 1 bytes.
+                // Server should reject the frame and cancel the connection.
+                var header = Data()
+                var badLen = (AgentServer.maxMessageLength + 1).bigEndian
+                withUnsafeBytes(of: &badLen) { header.append(contentsOf: $0) }
+                connection.send(content: header, completion: .contentProcessed { _ in })
+
+                // Try to receive anything; we expect either 0 bytes and
+                // a completed flag, or an error — both indicate the server
+                // closed the connection rather than buffering the fake frame.
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 4) { _, _, isComplete, error in
+                    if isComplete || error != nil {
+                        expectation.fulfill()
+                    }
+                }
+            } else if case .failed = state {
+                expectation.fulfill()
+            } else if case .cancelled = state {
+                expectation.fulfill()
+            }
+        }
+        connection.start(queue: .global())
+
+        waitForExpectations(timeout: 5)
+    }
+
+    func testUnknownMessageTypeReturnsFailure() throws {
+        let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        try server.start()
+        defer { server.listener?.cancel() }
+
+        let expectation = self.expectation(description: "Got failure byte")
+
+        let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                // Packet: [uint32 length=1] [byte 99]
+                var packet = Data()
+                var length = UInt32(1).bigEndian
+                withUnsafeBytes(of: &length) { packet.append(contentsOf: $0) }
+                packet.append(0x63) // 99 — not a valid message type
+                connection.send(content: packet, completion: .contentProcessed { _ in })
+
+                // Read the length-prefixed failure response
+                connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { lenBytes, _, _, _ in
+                    guard let lenBytes = lenBytes else { return }
+                    let len = lenBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    connection.receive(minimumIncompleteLength: Int(len), maximumLength: Int(len)) { body, _, _, _ in
+                        guard let body = body, body.count == 1 else { return }
+                        XCTAssertEqual(body[body.startIndex], 5, "expected SSH_AGENT_FAILURE byte")
+                        expectation.fulfill()
+                    }
+                }
+            }
+        }
+        connection.start(queue: .global())
+
+        waitForExpectations(timeout: 5)
+    }
+
+    func testSignRequestWithUnknownKeyBlobReturnsFailure() throws {
+        let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        try server.start()
+        defer { server.listener?.cancel() }
+
+        let expectation = self.expectation(description: "Got failure byte")
+
+        let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                // SSH2_AGENTC_SIGN_REQUEST (13) with a blob that won't match
+                // anything MockKeyManager can produce.
+                var writer = SSHWriter()
+                writer.write(UInt8(13))
+                writer.write(Data(repeating: 0xAA, count: 64))     // bogus blob
+                writer.write("data-to-sign".data(using: .utf8)!)
+                writer.write(UInt32(0))                            // flags
+
+                var packet = Data()
+                var length = UInt32(writer.data.count).bigEndian
+                withUnsafeBytes(of: &length) { packet.append(contentsOf: $0) }
+                packet.append(writer.data)
+                connection.send(content: packet, completion: .contentProcessed { _ in })
+
+                connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { lenBytes, _, _, _ in
+                    guard let lenBytes = lenBytes else { return }
+                    let len = lenBytes.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    connection.receive(minimumIncompleteLength: Int(len), maximumLength: Int(len)) { body, _, _, _ in
+                        guard let body = body, body.count == 1 else { return }
+                        XCTAssertEqual(body[body.startIndex], 5, "expected SSH_AGENT_FAILURE for unknown key")
+                        expectation.fulfill()
+                    }
+                }
+            }
+        }
+        connection.start(queue: .global())
+
+        waitForExpectations(timeout: 5)
     }
 }
