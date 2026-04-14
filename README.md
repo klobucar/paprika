@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/paprika.png" width="320" alt="Paprika SSH Agent">
+</p>
+
 # Paprika
 
 A Secure Enclave SSH agent for macOS that lives entirely in your terminal.
@@ -152,6 +156,10 @@ Paprika does **not** protect against:
 ```
 
 ---
+
+## AI Honesty
+
+Parts of Paprika were written with [Claude](https://claude.com/claude-code) as a pair-programmer — design discussions, SSH agent protocol wiring, Secure Enclave access control, test scaffolding, and this README itself. Every line was reviewed, tested, and accepted by a human before landing. This note exists because attribution belongs somewhere readers can see it, not buried in commit trailers.
 
 ## License
 
