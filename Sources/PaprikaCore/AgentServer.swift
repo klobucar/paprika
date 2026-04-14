@@ -228,9 +228,12 @@ public class AgentServer {
             return
         }
 
+        let reason = AgentServer.signContextDescription(for: dataToSign)
+        logger.info("signing: \(reason, privacy: .public) with key \(keyName, privacy: .public)")
+
         let signature: Data
         do {
-            signature = try keyManager.sign(data: dataToSign, keyName: keyName)
+            signature = try keyManager.sign(data: dataToSign, keyName: keyName, reason: reason)
         } catch {
             logger.error("signing error: \(error.localizedDescription, privacy: .public)")
             sendFailure(connection: connection)
@@ -261,6 +264,63 @@ public class AgentServer {
         send(payload: responseWriter.data, connection: connection)
     }
     
+    // MARK: - Context extraction
+
+    /// Best-effort decode of an SSH sign request's data-to-sign blob
+    /// into a human-readable description for the Touch ID dialog.
+    ///
+    /// Two payload shapes are recognized:
+    ///
+    ///   * **SSHSIG** (RFC draft-ietf-curdle-ssh-signature, used by
+    ///     `ssh-keygen -Y sign` and therefore by `git commit -S`).
+    ///     Begins with the ASCII magic `SSHSIG`, followed by a uint32
+    ///     version and a length-prefixed namespace string (`git`,
+    ///     `file`, etc.). We extract the namespace for the prompt.
+    ///
+    ///   * **SSH publickey auth request** (RFC 4252 §7). The signed
+    ///     blob starts with a length-prefixed session identifier, then
+    ///     a single byte equal to 50 (`SSH_MSG_USERAUTH_REQUEST`),
+    ///     then length-prefixed username, service, method strings.
+    ///     We extract username + service ("user @ service").
+    ///
+    /// Any parse failure falls back to a generic description. Never
+    /// throws — a prompt that says "authorize SSH signing" is a bad
+    /// UX, not a security failure.
+    internal static func signContextDescription(for data: Data) -> String {
+        // SSHSIG path
+        let sigMagic = Data("SSHSIG".utf8)
+        if data.count >= 6, data.prefix(6) == sigMagic {
+            // Wrap in fresh Data so the slice has 0-based indices —
+            // SSHReader does subdata(in: 0..<N) which would otherwise
+            // trap on a Data.SubSequence whose startIndex is 6.
+            var reader = SSHReader(data: Data(data.dropFirst(6)))
+            _ = try? reader.readUInt32() // version
+            if let namespace = try? reader.readString(), !namespace.isEmpty {
+                switch namespace {
+                case "git":
+                    return "Paprika: sign git commit or tag"
+                case "file":
+                    return "Paprika: sign file"
+                default:
+                    return "Paprika: sign \(namespace)"
+                }
+            }
+            return "Paprika: sign SSHSIG request"
+        }
+
+        // SSH auth request path
+        var reader = SSHReader(data: data)
+        if (try? reader.readData()) != nil,                          // session_id
+           let msgType = try? reader.readByte(), msgType == 50,      // USERAUTH_REQUEST
+           let user = try? reader.readString(),
+           let service = try? reader.readString(),
+           let method = try? reader.readString(), method == "publickey" {
+            return "Paprika: SSH auth as \(user) (\(service))"
+        }
+
+        return "Paprika: authorize SSH signing"
+    }
+
     private func writeMpint(_ value: Data, to writer: inout SSHWriter) {
         var data = value
         while data.first == 0 && data.count > 1 {

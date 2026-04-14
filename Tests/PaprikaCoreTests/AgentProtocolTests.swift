@@ -35,7 +35,7 @@ class MockKeyManager: KeyManager {
         return SecKeyCopyExternalRepresentation(publicKey, &error) as Data?
     }
     
-    override func sign(data: Data, keyName: String) throws -> Data {
+    override func sign(data: Data, keyName: String, reason: String = "") throws -> Data {
         guard let key = testKey else {
             throw KeyManagerError.signingFailed("No test key available")
         }
@@ -188,5 +188,58 @@ final class AgentProtocolTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+final class SignContextParserTests: XCTestCase {
+    func testSSHSIGGitNamespace() {
+        // SSHSIG magic + version(1) + namespace("git") + reserved("") + ...
+        var blob = SSHWriter()
+        blob.writeRaw(Data("SSHSIG".utf8))
+        blob.write(UInt32(1))              // version
+        blob.write("git")                  // namespace
+        blob.write("")                     // reserved
+        blob.write("sha512")               // hash algo
+        blob.write(Data([0x01, 0x02]))     // H(message)
+
+        let reason = AgentServer.signContextDescription(for: blob.data)
+        XCTAssertEqual(reason, "Paprika: sign git commit or tag")
+    }
+
+    func testSSHSIGFileNamespace() {
+        var blob = SSHWriter()
+        blob.writeRaw(Data("SSHSIG".utf8))
+        blob.write(UInt32(1))
+        blob.write("file")
+        blob.write("")
+        blob.write("sha512")
+        blob.write(Data([0x00]))
+
+        XCTAssertEqual(
+            AgentServer.signContextDescription(for: blob.data),
+            "Paprika: sign file"
+        )
+    }
+
+    func testSSHAuthRequest() {
+        // Construct what ssh normally passes as data-to-sign for publickey auth:
+        //   session_id, 50, username, service, "publickey", TRUE, algo, pubkey
+        var blob = SSHWriter()
+        blob.write(Data(repeating: 0xAB, count: 32))   // session id
+        blob.write(UInt8(50))                          // SSH_MSG_USERAUTH_REQUEST
+        blob.write("klobucar")                         // username
+        blob.write("ssh-connection")                   // service
+        blob.write("publickey")                        // method
+        blob.write(UInt8(1))                           // has signature (TRUE)
+        blob.write("ecdsa-sha2-nistp256")              // algo
+        blob.write(Data([0x04, 0x05, 0x06]))           // public key blob
+
+        let reason = AgentServer.signContextDescription(for: blob.data)
+        XCTAssertEqual(reason, "Paprika: SSH auth as klobucar (ssh-connection)")
+    }
+
+    func testUnknownPayloadFallback() {
+        let reason = AgentServer.signContextDescription(for: Data([0xFF, 0xFE, 0xFD]))
+        XCTAssertEqual(reason, "Paprika: authorize SSH signing")
     }
 }

@@ -115,12 +115,15 @@ open class KeyManager {
         }
     }
     
-    open func sign(data: Data, keyName: String) throws -> Data {
+    open func sign(data: Data, keyName: String, reason: String = "Paprika: authorize SSH signing") throws -> Data {
         let tag = (Self.tagPrefix + keyName).data(using: .utf8)!
         // Fresh LAContext per call — no cached authentication carries over,
-        // so the Secure Enclave will demand Touch ID every time.
+        // so the Secure Enclave will demand Touch ID every time. The caller
+        // supplies a human-readable reason string so the Touch ID dialog
+        // tells the user what is actually being signed ("SSH auth as foo @
+        // ssh-connection", "sign git commit or tag", etc.).
         let context = LAContext()
-        context.localizedReason = "Paprika: authorize SSH signing"
+        context.localizedReason = reason
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
