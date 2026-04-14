@@ -9,7 +9,7 @@ import Darwin
 struct Paprika: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Secure Enclave SSH Agent",
-        subcommands: [Generate.self, Delete.self, Serve.self, Install.self, Uninstall.self, Show.self, GitSetup.self]
+        subcommands: [Generate.self, Delete.self, Serve.self, Install.self, Uninstall.self, Status.self, Show.self, GitSetup.self]
     )
 }
 
@@ -186,6 +186,183 @@ struct Install: ParsableCommand {
         print("")
         print("Stop and remove:")
         print("  paprika uninstall")
+    }
+}
+
+struct Status: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Show paprika agent, socket, key, and audit log state",
+        discussion: """
+            By default, status output is safe to paste into a bug report or a
+            shared Slack thread: counts and system state only, no identifying
+            details.
+
+            Opt in to sensitive sections explicitly:
+
+              --keys     show key names, fingerprints, and public keys
+              --audit    show recent audit log entries (time + context of
+                         signing operations — reveals who/what you signed for)
+              --tail N   with --audit, limit to N most recent entries (default 5)
+            """
+    )
+
+    @Flag(name: .shortAndLong, help: "Show key names, fingerprints, and public keys")
+    var keys: Bool = false
+
+    @Flag(name: .shortAndLong, help: "Show recent audit log entries")
+    var audit: Bool = false
+
+    @Option(name: .long, help: "With --audit, number of recent entries to show")
+    var tail: Int = 5
+
+    func run() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let socketPath = home.appendingPathComponent(".paprika/agent.sock")
+        let plistPath = home.appendingPathComponent("Library/LaunchAgents/com.paprika.agent.plist")
+        let auditPath = home.appendingPathComponent("Library/Logs/paprika/signatures.log")
+
+        // --- binary identity ---
+        print("=== binary ===")
+        if let team = try? CodeSignatureCheck.requireTeamIdentifier() {
+            print("  code signature: valid, team \(team)")
+        } else {
+            print("  code signature: ad-hoc or invalid (SE access will fail)")
+        }
+
+        // --- launchd ---
+        print("")
+        print("=== launchd ===")
+        if FileManager.default.fileExists(atPath: plistPath.path) {
+            print("  plist:        installed")
+            let uid = getuid()
+            let loaded = launchctlPrint(target: "gui/\(uid)/com.paprika.agent")
+            if loaded.pid != nil {
+                print("  state:        loaded")
+            } else {
+                print("  state:        plist present but not loaded")
+                print("  load with:    launchctl bootstrap gui/$UID \(plistPath.path)")
+            }
+        } else {
+            print("  plist:        not installed")
+            print("  install with: paprika install")
+        }
+
+        // --- socket ---
+        print("")
+        print("=== socket ===")
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: socketPath.path) {
+            let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+            print("  state:   listening, mode \(String(format: "0%o", perms))")
+            if !keys {
+                print("  (run 'paprika status --keys' to see key fingerprints)")
+            }
+        } else {
+            print("  state:   missing — paprika serve is not running")
+        }
+
+        // --- keys ---
+        print("")
+        print("=== keys ===")
+        let keyManager = KeyManager()
+        let keyList = (try? keyManager.listKeys()) ?? []
+        if keyList.isEmpty {
+            print("  (none) — generate one with: paprika generate <name>")
+        } else if !keys {
+            print("  \(keyList.count) key\(keyList.count == 1 ? "" : "s") present")
+            print("  (run 'paprika status --keys' to show names and fingerprints)")
+        } else {
+            for name in keyList {
+                if let key = try? keyManager.getKey(name: name),
+                   let pub = keyManager.getSSHPublicKey(key: key),
+                   let pubData = keyManager.getPublicKeyData(key: key) {
+                    var blob = SSHWriter()
+                    blob.write("ecdsa-sha2-nistp256")
+                    blob.write("nistp256")
+                    blob.write(pubData)
+                    let digest = SHA256.hash(data: blob.data)
+                    let fp = Data(digest).base64EncodedString().replacingOccurrences(of: "=", with: "")
+                    print("  \(name)")
+                    print("    SHA256:\(fp)")
+                    print("    \(pub.prefix(70))...")
+                } else {
+                    print("  \(name)  (inaccessible)")
+                }
+            }
+        }
+
+        // --- local git signing config ---
+        print("")
+        print("=== git signing (this repo) ===")
+        let gpgFormat = gitConfigValue("gpg.format") ?? "(unset)"
+        let commitSign = gitConfigValue("commit.gpgSign") ?? "(unset)"
+        let signingKeyRaw = gitConfigValue("user.signingkey")
+        let allowedSigners = gitConfigValue("gpg.ssh.allowedSignersFile") ?? "(unset)"
+        print("  gpg.format:                  \(gpgFormat)")
+        print("  commit.gpgSign:              \(commitSign)")
+        if keys, let raw = signingKeyRaw {
+            print("  user.signingkey:             \(raw.prefix(70))\(raw.count > 70 ? "..." : "")")
+        } else {
+            print("  user.signingkey:             \(signingKeyRaw == nil ? "(unset)" : "(set, --keys to show)")")
+        }
+        print("  gpg.ssh.allowedSignersFile:  \(allowedSigners)")
+
+        // --- audit log ---
+        print("")
+        print("=== audit log ===")
+        let log = AuditLog(path: auditPath)
+        let entries = log.readAll()
+        if entries.isEmpty {
+            print("  (no entries yet)")
+        } else if !audit {
+            print("  \(entries.count) entries recorded")
+            print("  (run 'paprika status --audit' to show recent entries; may reveal")
+            print("   usernames, hostnames, and signing times)")
+        } else {
+            let recent = Array(entries.suffix(tail))
+            for entry in recent {
+                print("  \(entry.ts)  \(entry.key)  \(entry.context)")
+            }
+            print("")
+            print("  showing last \(recent.count) of \(entries.count) entries")
+            print("  log file: \(auditPath.path)")
+        }
+    }
+
+    private func launchctlPrint(target: String) -> (pid: Int?, state: String?) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", target]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return (nil, nil) }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        var pid: Int?
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("pid =") {
+                pid = Int(trimmed.replacingOccurrences(of: "pid =", with: "").trimmingCharacters(in: .whitespaces))
+            }
+        }
+        return (pid, "loaded")
+    }
+
+    private func gitConfigValue(_ key: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["config", "--local", "--get", key]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let value = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (value?.isEmpty ?? true) ? nil : value
     }
 }
 
