@@ -22,6 +22,13 @@ public class AgentServer {
     public let keyManager: KeyManager
     public var listener: NWListener?
 
+    // Sign operations run on a dedicated serial queue so concurrent
+    // client connections cannot interleave Touch ID dialogs. Without
+    // this, two clients racing to sign at the same moment would produce
+    // two overlapping system prompts and the user would have no way to
+    // tell which one they're approving. All signing goes through here.
+    private let signQueue = DispatchQueue(label: "com.paprika.agent.sign")
+
     public init(socketPath: String, keyManager: KeyManager) {
         self.socketPath = socketPath
         self.keyManager = keyManager
@@ -181,10 +188,25 @@ public class AgentServer {
         let keyBlob = try reader.readData()
         let dataToSign = try reader.readData()
         let _ = try reader.readUInt32() // flags
-        
-        let keys = try keyManager.listKeys()
-        var foundKeyName: String? = nil
 
+        // Everything from here down is dispatched onto signQueue so
+        // overlapping clients don't produce overlapping Touch ID dialogs.
+        signQueue.async { [weak self] in
+            self?.performSign(keyBlob: keyBlob, dataToSign: dataToSign, connection: connection)
+        }
+    }
+
+    private func performSign(keyBlob: Data, dataToSign: Data, connection: NWConnection) {
+        let keys: [String]
+        do {
+            keys = try keyManager.listKeys()
+        } catch {
+            logger.error("listKeys failed: \(error.localizedDescription, privacy: .public)")
+            sendFailure(connection: connection)
+            return
+        }
+
+        var foundKeyName: String? = nil
         for name in keys {
             if let key = try? keyManager.getKey(name: name),
                let pubKeyData = keyManager.getPublicKeyData(key: key) {
@@ -214,20 +236,24 @@ public class AgentServer {
             sendFailure(connection: connection)
             return
         }
-        
-        let ecdsaSig = try P256.Signing.ECDSASignature(derRepresentation: signature)
+
+        guard let ecdsaSig = try? P256.Signing.ECDSASignature(derRepresentation: signature) else {
+            logger.error("failed to parse ECDSA signature")
+            sendFailure(connection: connection)
+            return
+        }
         let raw = ecdsaSig.rawRepresentation
         let r = raw.subdata(in: 0..<32)
         let s = raw.subdata(in: 32..<64)
-        
+
         var innerWriter = SSHWriter()
         writeMpint(r, to: &innerWriter)
         writeMpint(s, to: &innerWriter)
-        
+
         var sigWriter = SSHWriter()
         sigWriter.write("ecdsa-sha2-nistp256")
         sigWriter.write(innerWriter.data)
-        
+
         var responseWriter = SSHWriter()
         responseWriter.write(UInt8(14)) // SSH2_AGENT_SIGN_RESPONSE
         responseWriter.write(sigWriter.data)
