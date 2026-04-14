@@ -58,22 +58,41 @@ struct Delete: ParsableCommand {
 struct Serve: ParsableCommand {
     func run() throws {
         let socketDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".paprika")
-        
+
         // Ensure directory exists
         if !FileManager.default.fileExists(atPath: socketDir.path) {
             try FileManager.default.createDirectory(at: socketDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
         }
-        
+
         let socketPath = socketDir.appendingPathComponent("agent.sock").path
-        
+
         let keyManager = KeyManager()
         let server = AgentServer(socketPath: socketPath, keyManager: keyManager)
-        
-        // Handle signals to cleanup? Unlink is handled in start()
+
         try server.start()
-        
-        // Keep running
-        dispatchMain()
+
+        // Graceful shutdown: unlink the socket on SIGTERM (launchd stop)
+        // and SIGINT (Ctrl-C in a terminal). DispatchSource handlers run
+        // on a normal dispatch queue, so unlink + exit are safe here —
+        // unlike raw signal() handlers which are restricted to
+        // async-signal-safe calls.
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT,  SIG_IGN)
+
+        let shutdown: @Sendable () -> Void = {
+            unlink(socketPath)
+            Darwin.exit(0)
+        }
+        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        termSource.setEventHandler(handler: shutdown)
+        termSource.resume()
+        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        intSource.setEventHandler(handler: shutdown)
+        intSource.resume()
+
+        withExtendedLifetime((termSource, intSource)) {
+            dispatchMain()
+        }
     }
 }
 
