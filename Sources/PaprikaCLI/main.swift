@@ -161,6 +161,8 @@ struct Install: ParsableCommand {
                 <string>\(executablePath)</string>
                 <string>serve</string>
             </array>
+            <key>ProcessType</key>
+            <string>Interactive</string>
             <key>RunAtLoad</key>
             <true/>
             <key>KeepAlive</key>
