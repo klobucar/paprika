@@ -163,6 +163,60 @@ Every `git commit -S` will now prompt Touch ID and produce a hardware-bound, Sec
 
 ---
 
+## Architecture
+
+### Why the Secure Enclave?
+
+A traditional SSH key lives in `~/.ssh/id_ed25519` with mode `0600`. That file is readable by any process running as your user: your shell, your editor, your terminal multiplexer, a browser subprocess that escaped its sandbox, an `npm postinstall` script, a VS Code extension, a `curl | bash` from a stale tutorial. `chmod 0600` is not a security boundary against code running as you — it's a label.
+
+The [**Secure Enclave**](https://support.apple.com/guide/security/secure-enclave-sec59b0b31ff/web) is a dedicated hardware security coprocessor baked into every Apple Silicon Mac (and T2-generation Intel Macs). It runs its own sealed operating system on a physically separate chip that the main CPU cannot inspect, with its own memory the kernel cannot read. Keys generated inside the Secure Enclave have four properties that no file-based key can match:
+
+1. **Created in the SE.** `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` generates key material *inside the SE hardware*. The private key bytes never exist in the main CPU's memory at any point, not even for a microsecond. Userspace only ever holds an opaque handle.
+2. **Cannot be exported.** There is no API — public, private, or `@_spi` — that returns raw private key bytes for an SE-backed key. The SE will sign things for you, but it will not hand over the material. `paprika delete` does not copy the key out; it tells the SE to forget it.
+3. **Bound to this specific Mac.** The SE encrypts its stored keys with a hardware-fused root key unique to the SoC. You cannot move an SE-backed key to another Mac, and a kernel-level exfiltration attack on your Mac cannot produce anything usable off-device.
+4. **Require Touch ID per use** (with `.biometryCurrentSet`). Every signing operation invokes the Secure Enclave, which invokes the Touch ID sensor, which prompts you. No authentication caching. No session reuse. No "allow forever" checkbox. Enrolling a new fingerprint after key creation invalidates the key — so an attacker with brief physical access to an unlocked Mac cannot silently gain persistent signing authority.
+
+For the complete treatment, see Apple's [Platform Security Guide](https://support.apple.com/guide/security/welcome/web) — the Secure Enclave chapter covers the hardware design, boot attestation, and the key protection hierarchy in detail.
+
+**Translation:** malware with full user-level code execution on your Mac cannot extract a Paprika key. It can ask the agent to sign arbitrary data, but you will see a Touch ID dialog and can refuse. That's a strictly better security story than a `0600` file, at the cost of requiring physical presence for every signing operation — which was the goal.
+
+### Signing flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Client as ssh / git / scp
+    participant Sock as ~/.paprika/agent.sock<br/>(unix domain, 0600)
+    participant Agent as paprika serve<br/>(user process)
+    participant Sec as Security.framework
+    participant SE as Secure Enclave<br/>(separate chip)
+    participant TID as Touch ID sensor
+
+    Client->>Sock: connect
+    Note over Sock: kernel enforces peer UID<br/>via file-system permissions
+    Client->>Agent: SSH2_AGENTC_SIGN_REQUEST<br/>(data-to-sign + key blob)
+    Agent->>Sec: SecKeyCreateSignature<br/>(fresh LAContext)
+    Sec->>SE: sign(hash, key-handle)
+    SE->>TID: require biometry
+    TID-->>User: system dialog<br/>"Paprika: authorize SSH signing"
+    User->>TID: fingerprint
+    TID->>SE: authorized
+    SE->>Sec: signature bytes<br/>(private key never exits SE)
+    Sec->>Agent: signature
+    Agent->>Client: SSH2_AGENT_SIGN_RESPONSE
+    Client->>Client: use signature in SSH handshake
+```
+
+A few things worth pointing out about what is **not** in this flow:
+
+- **The private key never transits any box except "Secure Enclave."** The `Security.framework`, `paprika serve`, the Unix socket, and the SSH client never touch key material — only signatures.
+- **The Touch ID dialog is drawn by the OS**, not by paprika. Paprika cannot spoof it, style it, or inject text into it. An attacker impersonating the agent cannot fake a Touch ID prompt.
+- **`paprika serve` runs as an unprivileged user process.** It is not a kernel extension, not a root daemon, not a system service. Its only entitlement beyond the standard cert is `keychain-access-groups`, which scopes which keychain items it can see — not what it can do to the system.
+- **The socket is the trust boundary.** The kernel enforces it via file-system permissions (`0600` file under a `0700` directory owned by you). No userspace ACL check, no `getpeereid` gymnastics — just `chmod`.
+
+---
+
 ## Security model
 
 - **Non-extractable keys**: Keys are `kSecAttrIsExtractable: false` and generated directly inside the Secure Enclave. The private key material never exists outside the SE, not even in RAM.
