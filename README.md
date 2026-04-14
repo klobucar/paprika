@@ -1,5 +1,12 @@
 <p align="center">
-  <img src="assets/paprika.png" width="320" alt="Paprika SSH Agent">
+  <img src="assets/paprika.png" width="480" alt="Paprika SSH Agent">
+</p>
+
+<p align="center">
+  <a href="https://github.com/klobucar/paprika/actions/workflows/ci.yml"><img src="https://github.com/klobucar/paprika/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/swift-5.10%2B-orange.svg" alt="Swift 5.10+">
+  <img src="https://img.shields.io/badge/macOS-14%2B-blue.svg" alt="macOS 14+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
 # Paprika
