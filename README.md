@@ -19,15 +19,40 @@ Git commit signing is an excellent side benefit: because Paprika serves the same
 | | Paprika | Secretive |
 |---|---|---|
 | Interface | CLI daemon | GUI menu bar app |
-| Requires display session | No | Yes |
-| Runs on headless Mac | Yes | No |
+| Requires GUI login session | No | Yes |
 | Scripting / dotfiles | `paprika generate mykey` | Manual clicks |
 | Codebase size | ~600 lines of Swift | Much larger |
 | One-line Git signing setup | `paprika git-setup --global` | Manual |
 
-**Choose Paprika if** you live in the terminal, manage Macs with Ansible or bootstrap scripts, or run a headless Mac mini that you SSH into. Paprika is a `launchd` agent with no GUI dependencies — it starts before you log in and cleans up after itself.
+Both tools still require a human finger on a Touch ID sensor for every sign. Neither is suitable for fully unattended "headless" signing — see [Paprika is not for unattended automation](#paprika-is-not-for-unattended-automation) below.
+
+**Choose Paprika if** you live in the terminal, manage Macs with Ansible or bootstrap scripts, or want a launchd agent with no GUI dependencies that starts before you log in. The CLI-first model composes naturally with dotfiles, scripts, and SSH config.
 
 **Choose Secretive if** you want a polished GUI with a dedicated Touch ID dialog that names the requesting application. Secretive has years of production use and a much larger user base.
+
+---
+
+## Paprika is not for unattended automation
+
+Paprika is designed around a single assumption: **every signing operation has a human present who is willing to authenticate.** The Secure Enclave enforces this in hardware. There is no caching, no "trust this machine," no "sign the next 50 things without asking." If you think about SSH keys in terms of "my CI system pushes tags to Git," Paprika is the wrong tool.
+
+Specifically, **Paprika is not suitable for**:
+
+- **Unattended servers** — a Mac mini running as a build machine, a CI runner, a fleet automation box. No human is at the keyboard, nobody will answer the Touch ID prompt, every sign hangs until someone does.
+- **Background services signing on a timer** — cron jobs that auto-sign artifacts, `git push` from a scheduled launch agent, any form of "sign something every 5 minutes without asking."
+- **Headless Macs with no Touch ID sensor** — a Mac mini without a Touch ID-equipped keyboard cannot even generate Paprika keys. The access control policy requires biometry, and there's no hardware to provide it. (A `--auth=passcode` option that falls back to device passcode is possible and would remove the *sensor* requirement, but it still requires a human to *type the passcode*, so it doesn't solve the underlying problem.)
+- **Any workflow where "no prompt" is a feature, not a bug.**
+
+For any of those, use a tool whose design matches your threat model:
+
+| Need | Use this instead |
+|---|---|
+| Unattended signing on a Mac or Linux server | **[YubiKey](https://www.yubico.com/)** with touch-required bypass or PIN caching — hardware-backed, but policy-adjustable |
+| CI signing in the cloud | **[AWS KMS](https://aws.amazon.com/kms/) / [GCP Cloud KMS](https://cloud.google.com/security/products/security-key-management) / [Azure Key Vault](https://azure.microsoft.com/en-us/products/key-vault)** — remote HSMs with service account auth |
+| TPM-backed keys on Linux | `ssh-tpm-agent` or similar |
+| Headless CI / build farm | **Whatever your CI provider offers for secret management** |
+
+Paprika's only job is to be the SSH agent for *you, personally, at your laptop, right now, with a finger ready.* That's a real use case and we lean into it hard — but it is a narrow one. Know which one you're in.
 
 ---
 
@@ -135,6 +160,29 @@ rsync -av src/ bastion:dst/ # Touch ID prompts, then syncs
 ```
 
 You'll see a Touch ID prompt the first time in a session and on every signing operation — there is no authentication caching.
+
+### Working from a headless Mac via SSH agent forwarding
+
+People often ask how to use Paprika "on a headless Mac mini." The honest answer is **you don't run Paprika on the Mac mini — you run it on your laptop and forward the agent socket** to the Mac mini through SSH. Paprika's security model requires a human finger on a Touch ID sensor for each sign, so the agent has to live on the machine with a finger available. The headless machine becomes a *client* of your laptop's agent, not a host of its own.
+
+The standard SSH agent forwarding flag is `-A`:
+
+```bash
+# On your laptop (where Paprika runs):
+export SSH_AUTH_SOCK="$HOME/.paprika/agent.sock"
+
+# SSH to the Mac mini with agent forwarding enabled:
+ssh -A minimac
+
+# Now, on minimac, SSH_AUTH_SOCK is a tunneled socket back to your laptop.
+# Any git/ssh/scp operation on the mini will transparently reach Paprika:
+git push origin main         # Touch ID prompts on YOUR LAPTOP, not the mini
+ssh deploy@other-server      # Same — prompt appears on the laptop
+```
+
+Typical setup: your laptop with Touch ID is the agent host, the Mac mini (or Linux box, or any remote system) is the workstation or build server, and signing authority stays physically bound to you. This is the workflow Paprika is actually built for. `-A` is also how you chain through jump hosts — every hop back to the laptop is valid as long as the chain stays up.
+
+**Warning about agent forwarding:** SSH agent forwarding means any user who compromises root on a forwarded host can use your agent socket to sign things while your session is active. This is a long-standing SSH caveat, not a Paprika-specific one, but it's worth naming. Forward only to hosts you trust; prefer `-J` (ProxyJump) over `-A` when you don't need the downstream machine to use the agent itself.
 
 ### Deleting a key
 
