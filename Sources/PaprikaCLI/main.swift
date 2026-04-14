@@ -12,6 +12,11 @@ struct Paprika: ParsableCommand {
     )
 }
 
+struct RuntimeError: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}
+
 struct Generate: ParsableCommand {
     @Argument(help: "Name of the key")
     var name: String
@@ -223,6 +228,9 @@ struct GitSetup: ParsableCommand {
         process.arguments = args
         try process.run()
         process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw RuntimeError("git \(args.joined(separator: " ")) failed (exit \(process.terminationStatus))")
+        }
     }
 
     private func setupAllowedSigners(pubKeyString: String) throws {
