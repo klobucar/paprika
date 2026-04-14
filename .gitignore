@@ -1,8 +1,120 @@
+# ==========================================================================
+# macOS system files
+# ==========================================================================
 .DS_Store
-/.build
-/Packages
-xcuserdata/
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# AppleDouble resource-fork companions (._Filename alongside every file
+# when macOS copies to a non-HFS filesystem)
+._*
+
+# ==========================================================================
+# Swift Package Manager / Xcode build artifacts
+# ==========================================================================
+/.build/
+/Packages/
 DerivedData/
+xcuserdata/
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcworkspace/xcuserdata/
+*.xccheckout
+*.moved-aside
+
+# SwiftPM local editor state (but not Package.resolved — that is checked in)
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.swiftpm/xcode/xcuserdata/
+
+# ==========================================================================
+# Secrets, certificates, signing material
+# ==========================================================================
+# Local signing / notarization scripts with team-specific values.
+# If you need a genuinely public helper, add it explicitly with
+#   git add -f scripts/<file>
+scripts/
+
+# Apple Developer / provisioning artifacts — never commit these publicly
+*.provisionprofile
+*.mobileprovision
+*.cer
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Xcode build config files often carry DEVELOPMENT_TEAM and other
+# team-scoped identifiers
+*.xcconfig
+
+# Environment variable files — the single most common way secrets
+# accidentally land in public repos
+.env
+.env.*
+.envrc
+
+# Legacy SSH / FTP credential store
 .netrc
+
+# ==========================================================================
+# Vim swap / backup / session files
+# ==========================================================================
+*.swp
+*.swo
+*.swn
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+Session.vim
+.netrwhist
+
+# ==========================================================================
+# Emacs backup / autosave / lock files
+# ==========================================================================
+*~
+\#*\#
+.\#*
+*.elc
+auto-save-list/
+.projectile
+.emacs.desktop
+.emacs.desktop.lock
+
+# ==========================================================================
+# Debugger / core dumps
+# ==========================================================================
+.lldbinit
+lldb.log
+*.core
+core.*
+*.crash
+
+# ==========================================================================
+# Editor / IDE directories that may contain machine-local state
+# ==========================================================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ==========================================================================
+# Generic
+# ==========================================================================
+Thumbs.db          # Windows, in case a PR is cross-platform
+*.bak
+*.orig             # merge conflict artifacts
+*.rej              # patch reject artifacts
