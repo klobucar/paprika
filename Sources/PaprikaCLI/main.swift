@@ -552,35 +552,62 @@ struct GitSetup: ParsableCommand {
         // from a hostile local git config could inject extra trust entries.
         // Same for the public key string — paranoia costs nothing.
         guard !gitEmail.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("git user.email contains a newline character; refusing to write it to ~/.ssh/allowed_signers")
+            throw RuntimeError("git user.email contains a newline character; refusing to write it to allowed_signers")
         }
         guard !pubKeyString.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("public key string contains a newline character; refusing to write it to ~/.ssh/allowed_signers")
+            throw RuntimeError("public key string contains a newline character; refusing to write it to allowed_signers")
         }
 
-        let sshDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
-        let allowedSignersPath = sshDir.appendingPathComponent("allowed_signers")
+        let allowedSignersPath = try allowedSignersLocation()
 
         let entry = "\(gitEmail) \(pubKeyString)\n"
-        
-        if !FileManager.default.fileExists(atPath: sshDir.path) {
-            try FileManager.default.createDirectory(at: sshDir, withIntermediateDirectories: true, attributes: [FileAttributeKey.posixPermissions: 0o700])
-        }
-        
+
+        // Parent dir is guaranteed by allowedSignersLocation(); create the
+        // file if it doesn't exist yet.
         if !FileManager.default.fileExists(atPath: allowedSignersPath.path) {
             try "".write(to: allowedSignersPath, atomically: true, encoding: .utf8)
         }
-        
+
         let fileHandle = try FileHandle(forWritingTo: allowedSignersPath)
         fileHandle.seekToEndOfFile()
         fileHandle.write(entry.data(using: .utf8)!)
         fileHandle.closeFile()
-        
+
         print("Added key to \(allowedSignersPath.path)")
-        
+
         // Also configure git to use this file
         let configScope = global ? ["--global"] : []
         try runGit(args: configScope + ["config", "gpg.ssh.allowedSignersFile", allowedSignersPath.path])
+    }
+
+    /// Decide where to write / append the allowed_signers file.
+    ///
+    /// The file is semantically a **git** trust store (it's consumed by
+    /// `git` via `gpg.ssh.allowedSignersFile`, not by `ssh` itself), so
+    /// the XDG-compliant location under `~/.config/git/` is the correct
+    /// default for greenfield setups.
+    ///
+    /// For backward compatibility, if the user already has a populated
+    /// `~/.ssh/allowed_signers`, we append there instead so we don't
+    /// split their trust store across two files.
+    private func allowedSignersLocation() throws -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let legacyPath = home.appendingPathComponent(".ssh/allowed_signers")
+
+        // Respect an existing legacy file if it has any content — don't
+        // fragment the user's trust store.
+        if let data = try? Data(contentsOf: legacyPath), !data.isEmpty {
+            return legacyPath
+        }
+
+        // Default: XDG config location for git.
+        let xdgGitDir = home.appendingPathComponent(".config/git")
+        if !FileManager.default.fileExists(atPath: xdgGitDir.path) {
+            try FileManager.default.createDirectory(
+                at: xdgGitDir, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+        }
+        return xdgGitDir.appendingPathComponent("allowed_signers")
     }
 
     private func getGitEmail() -> String? {

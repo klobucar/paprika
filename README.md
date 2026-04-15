@@ -212,7 +212,7 @@ paprika git-setup --global
 # Specify a key by name:
 paprika git-setup --global github
 
-# Also add to ~/.ssh/allowed_signers (so `git log --show-signature` verifies):
+# Also add to ~/.config/git/allowed_signers (so `git log --show-signature` verifies):
 paprika git-setup --global --add-to-allowed
 ```
 
