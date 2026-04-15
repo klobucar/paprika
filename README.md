@@ -13,7 +13,9 @@
 
 A Secure Enclave SSH agent for macOS that lives entirely in your terminal.
 
-Paprika is an **SSH key manager** first and foremost. It generates SSH keys inside the Secure Enclave (they never leave, not even into RAM), manages them through the standard `ssh-agent` protocol, and requires a fresh Touch ID authentication for every single signing operation. Any tool that respects `SSH_AUTH_SOCK` — `ssh`, `git`, `scp`, `rsync`, `mosh`, Ansible, Terraform, anything — gets hardware-backed keys for free, without changing its configuration.
+Paprika is an **SSH key manager** first and foremost. It generates SSH keys inside the Secure Enclave (they never leave, not even into RAM), manages them through the standard `ssh-agent` protocol, and requires a fresh Touch ID authentication for every single signing operation.
+
+Any tool that invokes `ssh` as a subprocess gets hardware-backed keys for free, because the `ssh` binary is what reads `SSH_AUTH_SOCK`. This covers most of the command-line ecosystem: `ssh` itself, `git` (via `core.sshCommand`), `scp`, `rsync`, `mosh`, and Ansible's default SSH transport. Tools with their own **in-process** SSH implementations — GUI git clients built on libgit2 (e.g. Tower, GitKraken, GitHub Desktop), IDE plugins that embed their own SSH stack, and anything using `go-git` or `JGit` — do **not** route through the agent and will not work with Paprika. If in doubt, check whether your tool exec's `/usr/bin/ssh` under the hood.
 
 Git commit signing is an excellent side benefit: because Paprika serves the same keys over the agent protocol, `git commit -S` and `git log --show-signature` work against Secure Enclave keys with no extra plumbing. The signing is hardware-bound, Touch ID-gated, and — to our knowledge — as strong as anything a macOS command-line tool can offer.
 
