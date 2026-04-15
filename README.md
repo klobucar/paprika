@@ -172,7 +172,7 @@ You'll see a Touch ID prompt the first time in a session and on every signing op
 
 ### Working from a headless Mac via SSH agent forwarding
 
-People often ask how to use Paprika "on a headless Mac mini." The honest answer is **you don't run Paprika on the Mac mini — you run it on your laptop and forward the agent socket** to the Mac mini through SSH. Paprika's security model requires a human finger on a Touch ID sensor for each sign, so the agent has to live on the machine with a finger available. The headless machine becomes a *client* of your laptop's agent, not a host of its own.
+Can Paprika run on a headless Mac mini? No — but you might still want to use it *from* one. **You don't run Paprika on the Mac mini; you run it on your laptop and forward the agent socket** to the mini through SSH. Paprika's security model requires a human finger on a Touch ID sensor for each sign, so the agent has to live on the machine with a finger available. The headless machine becomes a *client* of your laptop's agent, not a host of its own.
 
 The standard SSH agent forwarding flag is `-A`:
 
