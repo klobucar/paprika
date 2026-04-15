@@ -580,28 +580,12 @@ struct GitSetup: ParsableCommand {
         try runGit(args: configScope + ["config", "gpg.ssh.allowedSignersFile", allowedSignersPath.path])
     }
 
-    /// Decide where to write / append the allowed_signers file.
-    ///
-    /// The file is semantically a **git** trust store (it's consumed by
-    /// `git` via `gpg.ssh.allowedSignersFile`, not by `ssh` itself), so
-    /// the XDG-compliant location under `~/.config/git/` is the correct
-    /// default for greenfield setups.
-    ///
-    /// For backward compatibility, if the user already has a populated
-    /// `~/.ssh/allowed_signers`, we append there instead so we don't
-    /// split their trust store across two files.
+    /// Location of the git trust store. `allowed_signers` is consumed
+    /// by `git` via `gpg.ssh.allowedSignersFile`, not by `ssh` itself,
+    /// so it lives under the XDG-compliant `~/.config/git/`.
     private func allowedSignersLocation() throws -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let legacyPath = home.appendingPathComponent(".ssh/allowed_signers")
-
-        // Respect an existing legacy file if it has any content — don't
-        // fragment the user's trust store.
-        if let data = try? Data(contentsOf: legacyPath), !data.isEmpty {
-            return legacyPath
-        }
-
-        // Default: XDG config location for git.
-        let xdgGitDir = home.appendingPathComponent(".config/git")
+        let xdgGitDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/git")
         if !FileManager.default.fileExists(atPath: xdgGitDir.path) {
             try FileManager.default.createDirectory(
                 at: xdgGitDir, withIntermediateDirectories: true,
