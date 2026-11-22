@@ -518,20 +518,8 @@ struct GitSetup: ParsableCommand {
     private func setupAllowedSigners(pubKeyString: String) throws {
         let gitEmail = getGitEmail() ?? "your-email@example.com"
 
-        // Refuse any embedded CR/LF. The allowed_signers file is a
-        // line-based format; an email like "foo@bar\nALL_SIGNERS_BYPASS ..."
-        // from a hostile local git config could inject extra trust entries.
-        // Same for the public key string — paranoia costs nothing.
-        guard !gitEmail.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("git user.email contains a newline character; refusing to write it to allowed_signers")
-        }
-        guard !pubKeyString.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("public key string contains a newline character; refusing to write it to allowed_signers")
-        }
-
+        let entry = try AllowedSigners.line(email: gitEmail, publicKey: pubKeyString)
         let allowedSignersPath = try allowedSignersLocation()
-
-        let entry = "\(gitEmail) \(pubKeyString)\n"
 
         // Parent dir is guaranteed by allowedSignersLocation(); create the
         // file if it doesn't exist yet.
