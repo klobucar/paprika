@@ -186,6 +186,10 @@ struct Status: ParsableCommand {
     @Option(name: .long, help: "With --audit, number of recent entries to show")
     var tail: Int = 5
 
+    func validate() throws {
+        guard tail >= 0 else { throw ValidationError("--tail must be zero or more") }
+    }
+
     func run() throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let socketPath = home.appendingPathComponent(".paprika/agent.sock")
