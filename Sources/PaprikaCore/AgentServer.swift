@@ -18,6 +18,26 @@ public class AgentServer {
     // network stack to buffer gigabytes before delivery — a trivial DoS.
     public static let maxMessageLength: UInt32 = 256 * 1024
 
+    /// Most clients connected at once. launchd gives agents a soft
+    /// RLIMIT_NOFILE of 256, and every client holds a descriptor, so an
+    /// unbounded pile of idle connections (say, from a malicious host over
+    /// agent forwarding) would stop the agent from accepting anyone. At
+    /// the cap, the longest-idle client is dropped to make room.
+    public static let maxClients = 128
+
+    /// Most sign requests waiting for (or showing) Touch ID at once. Past
+    /// this, a new sign request fails immediately instead of lining up
+    /// yet another prompt behind the others.
+    public static let maxPendingSigns = 8
+
+    /// Most requests one client may have queued. Agent clients wait for
+    /// each reply before sending the next request; a deep pipeline is abuse.
+    static let maxQueuedPerClient = 4
+
+    /// A client that sends part of a message and then stalls is dropped
+    /// after this long, so it can't hold a connection slot forever.
+    static let partialMessageTimeout: TimeInterval = 10
+
     public let socketPath: String
     public let keyManager: KeyManager
     public var listener: NWListener?
@@ -33,21 +53,53 @@ public class AgentServer {
     /// default. Records every successful sign.
     private let auditLog: AuditLog
 
+    private let lock = NSLock()
+    private var clients: [ObjectIdentifier: Client] = [:]  // guarded by lock
+    private var pendingSigns = 0                            // guarded by lock
+
+    /// One connected agent client.
+    private final class Client {
+        let connection: NWConnection
+        /// Network callbacks and message framing.
+        let io = DispatchQueue(label: "com.paprika.agent.client.io")
+        /// Requests run here one at a time, so replies go out in request
+        /// order even while a sign is waiting on Touch ID.
+        let work = DispatchQueue(label: "com.paprika.agent.client.work")
+        var buffer = Data()           // io queue only
+        var partialSince: Date?       // io queue only
+        var lastActivity = Date()     // guarded by server lock
+        var queued = 0                // guarded by server lock
+        /// The peer has closed. Its queued sign requests are dropped:
+        /// nobody is waiting for those Touch ID prompts any more.
+        var gone = false              // guarded by server lock
+
+        init(_ connection: NWConnection) { self.connection = connection }
+    }
+
+    enum FrameError: Error, CustomStringConvertible {
+        case badLength(UInt32)
+        var description: String {
+            switch self {
+            case .badLength(let n): return "message length \(n) outside 1...\(AgentServer.maxMessageLength)"
+            }
+        }
+    }
+
     public init(socketPath: String, keyManager: KeyManager, auditLog: AuditLog = .default()) {
         self.socketPath = socketPath
         self.keyManager = keyManager
         self.auditLog = auditLog
     }
-    
+
     public func start() throws {
         unlink(socketPath)
-        
+
         // Configure for Unix Socket using TCP parameters (Stream)
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.unix(path: socketPath)
-        
+
         listener = try NWListener(using: parameters)
-        
+
         listener?.stateUpdateHandler = { state in
             switch state {
             case .ready:
@@ -65,143 +117,266 @@ public class AgentServer {
             default: break
             }
         }
-        
+
         listener?.newConnectionHandler = { connection in
             self.handleConnection(connection)
         }
-        
+
         listener?.start(queue: .main)
     }
-    
+
+    // MARK: - Connections
+
     private func handleConnection(_ connection: NWConnection) {
-        connection.start(queue: .global(qos: .userInitiated))
-        readLoop(connection)
-    }
-    
-    private func readLoop(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, _, isComplete, error in
-            if isComplete {
-                 connection.cancel()
-                 return
+        let client = Client(connection)
+        var evicted: Client?
+        let admitted: Bool = lock.withLock {
+            if clients.count >= Self.maxClients,
+               let idlest = clients.values.filter({ $0.queued == 0 }).min(by: { $0.lastActivity < $1.lastActivity }) {
+                idlest.gone = true
+                clients[ObjectIdentifier(idlest)] = nil
+                evicted = idlest
             }
-            if let error = error {
-                logger.error("connection error: \(error.localizedDescription, privacy: .public)")
+            guard clients.count < Self.maxClients else { return false }
+            clients[ObjectIdentifier(client)] = client
+            return true
+        }
+        if let evicted {
+            logger.warning("client limit (\(Self.maxClients)) reached; dropping the longest-idle client")
+            evicted.connection.cancel()
+        }
+        guard admitted else {
+            logger.warning("client limit (\(Self.maxClients)) reached and every client is busy; refusing connection")
+            connection.cancel()
+            return
+        }
+
+        // Network.framework releases these handlers once the connection is
+        // cancelled, which breaks the client <-> connection reference cycle.
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed:
+                self?.forget(client)
                 connection.cancel()
-                return
-            }
-
-            guard let content = content, content.count == 4 else { return }
-            let length = content.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-
-            guard length > 0 && length <= AgentServer.maxMessageLength else {
-                logger.warning("rejecting oversized agent message: \(length) bytes (max \(AgentServer.maxMessageLength))")
-                connection.cancel()
-                return
-            }
-
-            connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { body, _, _, error in
-                if let error = error {
-                    logger.error("read body error: \(error.localizedDescription, privacy: .public)")
-                    connection.cancel()
-                    return
-                }
-                
-                guard let body = body, body.count == Int(length) else {
-                    connection.cancel()
-                    return
-                }
-                
-                self.processMessage(body, connection: connection)
-                self.readLoop(connection)
+            case .cancelled:
+                self?.forget(client)
+            default:
+                break
             }
         }
+        connection.start(queue: client.io)
+        receive(client)
     }
-    
-    private func processMessage(_ data: Data, connection: NWConnection) {
+
+    private func forget(_ client: Client) {
+        lock.withLock {
+            client.gone = true
+            clients[ObjectIdentifier(client)] = nil
+        }
+    }
+
+    private func receive(_ client: Client) {
+        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] content, _, isComplete, error in
+            guard let self else { return }
+            if let content { client.buffer.append(content) }
+
+            do {
+                while let frame = try Self.nextFrame(from: &client.buffer) {
+                    guard self.enqueue(frame, for: client) else {
+                        logger.warning("client queued more than \(Self.maxQueuedPerClient) requests; disconnecting")
+                        client.connection.cancel()
+                        return
+                    }
+                }
+            } catch {
+                logger.warning("rejecting agent message: \(String(describing: error), privacy: .public)")
+                client.connection.cancel()
+                return
+            }
+
+            if let error {
+                logger.error("connection error: \(error.localizedDescription, privacy: .public)")
+                client.connection.cancel()
+                return
+            }
+            if isComplete {
+                // The peer closed its end. Still answer what it already sent
+                // (`printf ... | nc -U` style clients rely on that), then
+                // close once the work queue has drained. Its sign requests
+                // are skipped rather than prompted: see performSign.
+                self.lock.withLock { client.gone = true }
+                client.work.async {
+                    client.connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                                           completion: .contentProcessed { _ in client.connection.cancel() })
+                }
+                return
+            }
+
+            self.armPartialMessageTimer(client)
+            self.receive(client)
+        }
+    }
+
+    /// Pops one complete length-prefixed message off the front of
+    /// `buffer`. Returns nil until the whole message has arrived; throws
+    /// on a zero or oversized length so the caller can drop the client.
+    static func nextFrame(from buffer: inout Data) throws -> Data? {
+        guard buffer.count >= 4 else { return nil }
+        let start = buffer.startIndex
+        let length = buffer[start..<start + 4].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        guard length > 0, length <= maxMessageLength else { throw FrameError.badLength(length) }
+        let end = start + 4 + Int(length)
+        guard buffer.endIndex >= end else { return nil }
+        let frame = Data(buffer[(start + 4)..<end])
+        buffer = Data(buffer[end...])
+        return frame
+    }
+
+    /// Drop the client if a partly received message doesn't complete in
+    /// time. Runs on the client's io queue.
+    private func armPartialMessageTimer(_ client: Client) {
+        guard !client.buffer.isEmpty else {
+            client.partialSince = nil
+            return
+        }
+        guard client.partialSince == nil else { return }
+        let started = Date()
+        client.partialSince = started
+        client.io.asyncAfter(deadline: .now() + Self.partialMessageTimeout) {
+            guard client.partialSince == started else { return }
+            logger.warning("dropping client: message incomplete after \(Int(Self.partialMessageTimeout))s")
+            client.connection.cancel()
+        }
+    }
+
+    /// Queue one request on the client's work queue. Returns false if the
+    /// client already has too many requests queued.
+    private func enqueue(_ message: Data, for client: Client) -> Bool {
+        let isSign = message.first == 13
+        var admitted = false
+        var holdsSignSlot = false
+        lock.withLock {
+            client.lastActivity = Date()
+            guard client.queued < Self.maxQueuedPerClient else { return }
+            admitted = true
+            client.queued += 1
+            if isSign && pendingSigns < Self.maxPendingSigns {
+                pendingSigns += 1
+                holdsSignSlot = true
+            }
+        }
+        guard admitted else { return false }
+
+        client.work.async { [self] in
+            defer {
+                lock.withLock {
+                    client.queued -= 1
+                    if holdsSignSlot { pendingSigns -= 1 }
+                }
+            }
+            if isSign && !holdsSignSlot {
+                logger.warning("\(Self.maxPendingSigns) sign requests already pending; refusing another")
+                sendFailure(connection: client.connection)
+                return
+            }
+            processMessage(message, client: client)
+        }
+        return true
+    }
+
+    // MARK: - Messages
+
+    private func processMessage(_ data: Data, client: Client) {
         var reader = SSHReader(data: data)
-        
+
         do {
             let msgType = try reader.readByte()
-            
+
             switch msgType {
             case 11: // SSH2_AGENTC_REQUEST_IDENTITIES
-                try handleRequestIdentities(connection: connection)
+                try handleRequestIdentities(connection: client.connection)
             case 13: // SSH2_AGENTC_SIGN_REQUEST
-                try handleSignRequest(reader: &reader, connection: connection)
+                try handleSignRequest(reader: &reader, client: client)
             default:
-                sendFailure(connection: connection)
+                sendFailure(connection: client.connection)
             }
         } catch {
             logger.error("protocol error: \(error.localizedDescription, privacy: .public)")
-            sendFailure(connection: connection)
+            sendFailure(connection: client.connection)
         }
     }
-    
+
     private func sendFailure(connection: NWConnection) {
         let data = Data([5])
         send(payload: data, connection: connection)
     }
-    
+
     private func send(payload: Data, connection: NWConnection) {
         var writer = SSHWriter()
         writer.write(UInt32(payload.count))
         writer.writeRaw(payload)
-        
+
         connection.send(content: writer.data, completion: .contentProcessed { error in
             if let error = error {
                 logger.error("send error: \(error.localizedDescription, privacy: .public)")
             }
         })
     }
-    
+
     // MARK: - Handlers
-    
+
     private func handleRequestIdentities(connection: NWConnection) throws {
         let keys = try keyManager.listKeys()
         var writer = SSHWriter()
         writer.write(UInt8(12)) // SSH2_AGENT_IDENTITIES_ANSWER
-        
+
         var identitiesBuffer = Data()
         var validKeyCount: UInt32 = 0
-        
+
         for name in keys {
             if let key = try? keyManager.getKey(name: name),
                let pubKeyData = keyManager.getPublicKeyData(key: key) {
-                
+
                 // Construct Public Key Blob
                 var blobWriter = SSHWriter()
                 blobWriter.write("ecdsa-sha2-nistp256")
                 blobWriter.write("nistp256")
                 blobWriter.write(pubKeyData)
-                
+
                 var idWriter = SSHWriter()
                 idWriter.write(blobWriter.data)
                 idWriter.write(name)
-                
+
                 identitiesBuffer.append(idWriter.data)
                 validKeyCount += 1
             }
         }
-        
+
         writer.write(validKeyCount)
         writer.writeRaw(identitiesBuffer)
-        
+
         send(payload: writer.data, connection: connection)
     }
-    
-    private func handleSignRequest(reader: inout SSHReader, connection: NWConnection) throws {
+
+    private func handleSignRequest(reader: inout SSHReader, client: Client) throws {
         let keyBlob = try reader.readData()
         let dataToSign = try reader.readData()
         let _ = try reader.readUInt32() // flags
 
-        // Everything from here down is dispatched onto signQueue so
-        // overlapping clients don't produce overlapping Touch ID dialogs.
-        signQueue.async { [weak self] in
-            self?.performSign(keyBlob: keyBlob, dataToSign: dataToSign, connection: connection)
+        // signQueue serializes Touch ID dialogs across clients. sync keeps
+        // this client's later requests waiting until this reply is sent.
+        signQueue.sync {
+            performSign(keyBlob: keyBlob, dataToSign: dataToSign, client: client)
         }
     }
 
-    private func performSign(keyBlob: Data, dataToSign: Data, connection: NWConnection) {
+    private func performSign(keyBlob: Data, dataToSign: Data, client: Client) {
+        let connection = client.connection
+        if lock.withLock({ client.gone }) {
+            logger.info("dropping sign request: client disconnected before its turn")
+            return
+        }
+
         let keys: [String]
         do {
             keys = try keyManager.listKeys()
@@ -269,10 +444,10 @@ public class AgentServer {
         var responseWriter = SSHWriter()
         responseWriter.write(UInt8(14)) // SSH2_AGENT_SIGN_RESPONSE
         responseWriter.write(sigWriter.data)
-        
+
         send(payload: responseWriter.data, connection: connection)
     }
-    
+
     // MARK: - Context extraction
 
     /// Best-effort decode of an SSH sign request's data-to-sign blob
