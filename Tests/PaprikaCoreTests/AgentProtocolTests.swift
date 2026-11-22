@@ -526,6 +526,9 @@ final class ProtocolDefenseTests: XCTestCase {
         defer { server.listener?.cancel() }
 
         let expectation = self.expectation(description: "Connection closed")
+        // The receive callback and the state handler can both observe the
+        // close; either one is the outcome we want.
+        expectation.assertForOverFulfill = false
 
         let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
         connection.stateUpdateHandler = { state in
