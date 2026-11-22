@@ -116,7 +116,7 @@ struct Serve: ParsableCommand {
 
 struct Install: ParsableCommand {
     func run() throws {
-        let label = "com.paprika.agent"
+        let label = LaunchAgent.label
         let home = FileManager.default.homeDirectoryForCurrentUser
         let plistCacheURL = home
             .appendingPathComponent("Library/LaunchAgents/\(label).plist")
@@ -145,36 +145,7 @@ struct Install: ParsableCommand {
                 """)
         }
 
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(executablePath)</string>
-                <string>serve</string>
-            </array>
-            <key>ProcessType</key>
-            <string>Interactive</string>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <dict>
-                <key>SuccessfulExit</key>
-                <false/>
-                <key>Crashed</key>
-                <true/>
-            </dict>
-            <key>ThrottleInterval</key>
-            <integer>10</integer>
-        </dict>
-        </plist>
-        """
-
-        try plist.write(to: plistCacheURL, atomically: true, encoding: .utf8)
+        try LaunchAgent.plist(executablePath: executablePath).write(to: plistCacheURL, options: .atomic)
         print("Installed launchd agent to \(plistCacheURL.path)")
         print("Executable path: \(executablePath)")
         print("")
@@ -214,6 +185,10 @@ struct Status: ParsableCommand {
 
     @Option(name: .long, help: "With --audit, number of recent entries to show")
     var tail: Int = 5
+
+    func validate() throws {
+        guard tail >= 0 else { throw ValidationError("--tail must be zero or more") }
+    }
 
     func run() throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -506,16 +481,16 @@ struct GitSetup: ParsableCommand {
             return
         }
 
-        let configScope = global ? ["--global"] : []
-        
+        let gitConfig = ["config"] + (global ? ["--global"] : [])
+
         print("Configuring Git...")
-        try runGit(args: configScope + ["config", "gpg.format", "ssh"])
+        try runGit(args: gitConfig + ["gpg.format", "ssh"])
         // Modern git treats user.signingkey as a filesystem path unless
         // it's prefixed with key::, in which case the remainder is read
         // as a literal SSH public key line. Paprika keys live inside the
         // Secure Enclave and have no on-disk .pub file, so the literal
         // form is the only one that works.
-        try runGit(args: configScope + ["config", "user.signingkey", "key::\(pubKeyString)"])
+        try runGit(args: gitConfig + ["user.signingkey", "key::\(pubKeyString)"])
 
         if addToAllowed {
             try setupAllowedSigners(pubKeyString: pubKeyString)
@@ -547,20 +522,8 @@ struct GitSetup: ParsableCommand {
     private func setupAllowedSigners(pubKeyString: String) throws {
         let gitEmail = getGitEmail() ?? "your-email@example.com"
 
-        // Refuse any embedded CR/LF. The allowed_signers file is a
-        // line-based format; an email like "foo@bar\nALL_SIGNERS_BYPASS ..."
-        // from a hostile local git config could inject extra trust entries.
-        // Same for the public key string — paranoia costs nothing.
-        guard !gitEmail.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("git user.email contains a newline character; refusing to write it to allowed_signers")
-        }
-        guard !pubKeyString.contains(where: { $0 == "\n" || $0 == "\r" }) else {
-            throw RuntimeError("public key string contains a newline character; refusing to write it to allowed_signers")
-        }
-
+        let entry = try AllowedSigners.line(email: gitEmail, publicKey: pubKeyString)
         let allowedSignersPath = try allowedSignersLocation()
-
-        let entry = "\(gitEmail) \(pubKeyString)\n"
 
         // Parent dir is guaranteed by allowedSignersLocation(); create the
         // file if it doesn't exist yet.
@@ -576,8 +539,8 @@ struct GitSetup: ParsableCommand {
         print("Added key to \(allowedSignersPath.path)")
 
         // Also configure git to use this file
-        let configScope = global ? ["--global"] : []
-        try runGit(args: configScope + ["config", "gpg.ssh.allowedSignersFile", allowedSignersPath.path])
+        let gitConfig = ["config"] + (global ? ["--global"] : [])
+        try runGit(args: gitConfig + ["gpg.ssh.allowedSignersFile", allowedSignersPath.path])
     }
 
     /// Location of the git trust store. `allowed_signers` is consumed

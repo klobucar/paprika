@@ -47,11 +47,18 @@ class MockKeyManager: KeyManager {
     }
 }
 
+/// Audit log in a temp file. AgentServer defaults to the user's real
+/// ~/Library/Logs/paprika/signatures.log, which tests must never append to.
+func scratchAuditLog() -> AuditLog {
+    AuditLog(path: FileManager.default.temporaryDirectory
+        .appendingPathComponent("paprika-test-audit-\(UUID().uuidString).log"))
+}
+
 final class AgentProtocolTests: XCTestCase {
     func testRequestIdentities() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
         let keyManager = MockKeyManager()
-        let server = AgentServer(socketPath: socketPath, keyManager: keyManager)
+        let server = AgentServer(socketPath: socketPath, keyManager: keyManager, auditLog: scratchAuditLog())
         
         try server.start()
         
@@ -115,7 +122,7 @@ final class AgentProtocolTests: XCTestCase {
     func testSignRequest() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
         let keyManager = MockKeyManager()
-        let server = AgentServer(socketPath: socketPath, keyManager: keyManager)
+        let server = AgentServer(socketPath: socketPath, keyManager: keyManager, auditLog: scratchAuditLog())
         try server.start()
         
         let expectation = self.expectation(description: "Signature Received")
@@ -300,10 +307,10 @@ final class AuditLogTests: XCTestCase {
 
 final class SignContextParserTests: XCTestCase {
     func testSSHSIGGitNamespace() {
-        // SSHSIG magic + version(1) + namespace("git") + reserved("") + ...
+        // SSHSIG signed data: magic + namespace + reserved + hash algo + H(msg).
+        // (No version field; that's only in the armored signature.)
         var blob = SSHWriter()
         blob.writeRaw(Data("SSHSIG".utf8))
-        blob.write(UInt32(1))              // version
         blob.write("git")                  // namespace
         blob.write("")                     // reserved
         blob.write("sha512")               // hash algo
@@ -316,7 +323,6 @@ final class SignContextParserTests: XCTestCase {
     func testSSHSIGFileNamespace() {
         var blob = SSHWriter()
         blob.writeRaw(Data("SSHSIG".utf8))
-        blob.write(UInt32(1))
         blob.write("file")
         blob.write("")
         blob.write("sha512")
@@ -509,23 +515,51 @@ final class MpintTests: XCTestCase {
 
     func testZeroValue() {
         var w = SSHWriter()
-        // Single zero byte — the "strip leading zeros while > 1 byte"
-        // rule preserves this as a single 0x00.
+        // RFC 4251 §5: zero is stored as a string with zero bytes of data.
         AgentServer.writeMpint(Data([0x00]), to: &w)
         var r = SSHReader(data: w.data)
         let bytes = try? r.readData()
-        XCTAssertEqual(bytes, Data([0x00]))
+        XCTAssertEqual(bytes, Data())
+    }
+
+    func testLeadingZeroThenHighBit() {
+        // An r or s of 00 8x ... (about 1 in 256 signatures) used to trap:
+        // stripping the zero left a slice, and inserting the sign byte at
+        // index 0 of that slice is out of bounds.
+        var w = SSHWriter()
+        AgentServer.writeMpint(Data([0x00, 0x80, 0x01]), to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0x80, 0x01]))
+    }
+
+    func testManyLeadingZerosThenHighBit() {
+        var w = SSHWriter()
+        AgentServer.writeMpint(Data([0x00, 0x00, 0x00, 0xFF]), to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0xFF]))
+    }
+
+    func testSliceInput() {
+        // A Data slice whose startIndex isn't 0.
+        let slice = Data([0xAA, 0x00, 0x90]).dropFirst()
+        var w = SSHWriter()
+        AgentServer.writeMpint(slice, to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0x90]))
     }
 }
 
 final class ProtocolDefenseTests: XCTestCase {
     func testOversizedLengthCloses() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 
         let expectation = self.expectation(description: "Connection closed")
+        // The receive callback and the state handler can both observe the
+        // close; either one is the outcome we want.
+        expectation.assertForOverFulfill = false
 
         let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
         connection.stateUpdateHandler = { state in
@@ -558,7 +592,7 @@ final class ProtocolDefenseTests: XCTestCase {
 
     func testUnknownMessageTypeReturnsFailure() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 
@@ -593,7 +627,7 @@ final class ProtocolDefenseTests: XCTestCase {
 
     func testSignRequestWithUnknownKeyBlobReturnsFailure() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 

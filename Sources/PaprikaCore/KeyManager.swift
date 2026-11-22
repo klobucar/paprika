@@ -3,12 +3,25 @@ import Security
 import LocalAuthentication
 import CryptoKit
 
-public enum KeyManagerError: Error {
+public enum KeyManagerError: Error, CustomStringConvertible {
     case generationFailed(String)
     case deletionFailed(OSStatus)
     case itemNotFound
     case unexpectedData
     case signingFailed(String)
+    case alreadyExists(String)
+
+    public var description: String {
+        switch self {
+        case .generationFailed(let why): return "key generation failed: \(why)"
+        case .deletionFailed(let status): return "key deletion failed (OSStatus \(status))"
+        case .itemNotFound: return "key not found"
+        case .unexpectedData: return "unexpected keychain data"
+        case .signingFailed(let why): return "signing failed: \(why)"
+        case .alreadyExists(let name):
+            return "a key named '\(name)' already exists; delete it first with: paprika delete \(name)"
+        }
+    }
 }
 
 open class KeyManager {
@@ -17,6 +30,12 @@ open class KeyManager {
     public init() {}
 
     open func generateKey(name: String) throws -> SecKey {
+        // The keychain doesn't treat the application tag as unique, so a
+        // second key with the same name would be stored next to the first:
+        // lookups by name return either one, and delete removes both.
+        if try getKey(name: name) != nil {
+            throw KeyManagerError.alreadyExists(name)
+        }
         let tag = (Self.tagPrefix + name).data(using: .utf8)!
         
         // biometryCurrentSet (vs. biometryAny) invalidates the key if the
