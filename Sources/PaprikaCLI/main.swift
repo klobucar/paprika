@@ -477,16 +477,16 @@ struct GitSetup: ParsableCommand {
             return
         }
 
-        let configScope = global ? ["--global"] : []
-        
+        let gitConfig = ["config"] + (global ? ["--global"] : [])
+
         print("Configuring Git...")
-        try runGit(args: configScope + ["config", "gpg.format", "ssh"])
+        try runGit(args: gitConfig + ["gpg.format", "ssh"])
         // Modern git treats user.signingkey as a filesystem path unless
         // it's prefixed with key::, in which case the remainder is read
         // as a literal SSH public key line. Paprika keys live inside the
         // Secure Enclave and have no on-disk .pub file, so the literal
         // form is the only one that works.
-        try runGit(args: configScope + ["config", "user.signingkey", "key::\(pubKeyString)"])
+        try runGit(args: gitConfig + ["user.signingkey", "key::\(pubKeyString)"])
 
         if addToAllowed {
             try setupAllowedSigners(pubKeyString: pubKeyString)
@@ -547,8 +547,8 @@ struct GitSetup: ParsableCommand {
         print("Added key to \(allowedSignersPath.path)")
 
         // Also configure git to use this file
-        let configScope = global ? ["--global"] : []
-        try runGit(args: configScope + ["config", "gpg.ssh.allowedSignersFile", allowedSignersPath.path])
+        let gitConfig = ["config"] + (global ? ["--global"] : [])
+        try runGit(args: gitConfig + ["gpg.ssh.allowedSignersFile", allowedSignersPath.path])
     }
 
     /// Location of the git trust store. `allowed_signers` is consumed
