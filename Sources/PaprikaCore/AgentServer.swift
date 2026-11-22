@@ -329,16 +329,16 @@ public class AgentServer {
         return "Paprika: authorize SSH signing"
     }
 
+    /// RFC 4251 §5 mpint from an unsigned big-endian magnitude: no
+    /// leading zero bytes, a single 0x00 prefix when the top bit is set,
+    /// and zero encoded as the empty string.
     internal static func writeMpint(_ value: Data, to writer: inout SSHWriter) {
-        var data = value
-        while data.first == 0 && data.count > 1 {
-            data = data.dropFirst()
-        }
-        
+        // Rebase into a fresh Data: drop(while:) returns a slice whose
+        // startIndex isn't 0, and insert(_:at: 0) on that slice traps.
+        var data = Data(value.drop(while: { $0 == 0 }))
         if let first = data.first, (first & 0x80) != 0 {
             data.insert(0, at: 0)
         }
-        
         writer.write(data)
     }
 }

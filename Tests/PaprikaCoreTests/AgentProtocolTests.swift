@@ -509,12 +509,37 @@ final class MpintTests: XCTestCase {
 
     func testZeroValue() {
         var w = SSHWriter()
-        // Single zero byte — the "strip leading zeros while > 1 byte"
-        // rule preserves this as a single 0x00.
+        // RFC 4251 §5: zero is stored as a string with zero bytes of data.
         AgentServer.writeMpint(Data([0x00]), to: &w)
         var r = SSHReader(data: w.data)
         let bytes = try? r.readData()
-        XCTAssertEqual(bytes, Data([0x00]))
+        XCTAssertEqual(bytes, Data())
+    }
+
+    func testLeadingZeroThenHighBit() {
+        // An r or s of 00 8x ... (about 1 in 256 signatures) used to trap:
+        // stripping the zero left a slice, and inserting the sign byte at
+        // index 0 of that slice is out of bounds.
+        var w = SSHWriter()
+        AgentServer.writeMpint(Data([0x00, 0x80, 0x01]), to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0x80, 0x01]))
+    }
+
+    func testManyLeadingZerosThenHighBit() {
+        var w = SSHWriter()
+        AgentServer.writeMpint(Data([0x00, 0x00, 0x00, 0xFF]), to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0xFF]))
+    }
+
+    func testSliceInput() {
+        // A Data slice whose startIndex isn't 0.
+        let slice = Data([0xAA, 0x00, 0x90]).dropFirst()
+        var w = SSHWriter()
+        AgentServer.writeMpint(slice, to: &w)
+        var r = SSHReader(data: w.data)
+        XCTAssertEqual(try r.readData(), Data([0x00, 0x90]))
     }
 }
 
