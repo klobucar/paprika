@@ -116,7 +116,7 @@ struct Serve: ParsableCommand {
 
 struct Install: ParsableCommand {
     func run() throws {
-        let label = "com.paprika.agent"
+        let label = LaunchAgent.label
         let home = FileManager.default.homeDirectoryForCurrentUser
         let plistCacheURL = home
             .appendingPathComponent("Library/LaunchAgents/\(label).plist")
@@ -145,36 +145,7 @@ struct Install: ParsableCommand {
                 """)
         }
 
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(executablePath)</string>
-                <string>serve</string>
-            </array>
-            <key>ProcessType</key>
-            <string>Interactive</string>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <dict>
-                <key>SuccessfulExit</key>
-                <false/>
-                <key>Crashed</key>
-                <true/>
-            </dict>
-            <key>ThrottleInterval</key>
-            <integer>10</integer>
-        </dict>
-        </plist>
-        """
-
-        try plist.write(to: plistCacheURL, atomically: true, encoding: .utf8)
+        try LaunchAgent.plist(executablePath: executablePath).write(to: plistCacheURL, options: .atomic)
         print("Installed launchd agent to \(plistCacheURL.path)")
         print("Executable path: \(executablePath)")
         print("")
