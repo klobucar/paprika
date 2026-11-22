@@ -29,13 +29,14 @@ public class AgentServer {
     // tell which one they're approving. All signing goes through here.
     private let signQueue = DispatchQueue(label: "com.paprika.agent.sign")
 
-    /// Append-only audit log at ~/Library/Logs/paprika/signatures.log.
-    /// Records every successful sign. Created lazily at first use.
-    private let auditLog = AuditLog.default()
+    /// Append-only audit log, ~/Library/Logs/paprika/signatures.log by
+    /// default. Records every successful sign.
+    private let auditLog: AuditLog
 
-    public init(socketPath: String, keyManager: KeyManager) {
+    public init(socketPath: String, keyManager: KeyManager, auditLog: AuditLog = .default()) {
         self.socketPath = socketPath
         self.keyManager = keyManager
+        self.auditLog = auditLog
     }
     
     public func start() throws {

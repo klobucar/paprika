@@ -47,11 +47,18 @@ class MockKeyManager: KeyManager {
     }
 }
 
+/// Audit log in a temp file. AgentServer defaults to the user's real
+/// ~/Library/Logs/paprika/signatures.log, which tests must never append to.
+func scratchAuditLog() -> AuditLog {
+    AuditLog(path: FileManager.default.temporaryDirectory
+        .appendingPathComponent("paprika-test-audit-\(UUID().uuidString).log"))
+}
+
 final class AgentProtocolTests: XCTestCase {
     func testRequestIdentities() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
         let keyManager = MockKeyManager()
-        let server = AgentServer(socketPath: socketPath, keyManager: keyManager)
+        let server = AgentServer(socketPath: socketPath, keyManager: keyManager, auditLog: scratchAuditLog())
         
         try server.start()
         
@@ -115,7 +122,7 @@ final class AgentProtocolTests: XCTestCase {
     func testSignRequest() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
         let keyManager = MockKeyManager()
-        let server = AgentServer(socketPath: socketPath, keyManager: keyManager)
+        let server = AgentServer(socketPath: socketPath, keyManager: keyManager, auditLog: scratchAuditLog())
         try server.start()
         
         let expectation = self.expectation(description: "Signature Received")
@@ -545,7 +552,7 @@ final class MpintTests: XCTestCase {
 final class ProtocolDefenseTests: XCTestCase {
     func testOversizedLengthCloses() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 
@@ -585,7 +592,7 @@ final class ProtocolDefenseTests: XCTestCase {
 
     func testUnknownMessageTypeReturnsFailure() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 
@@ -620,7 +627,7 @@ final class ProtocolDefenseTests: XCTestCase {
 
     func testSignRequestWithUnknownKeyBlobReturnsFailure() throws {
         let socketPath = "/tmp/ppk-\(UUID().uuidString.prefix(8)).sock"
-        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager())
+        let server = AgentServer(socketPath: socketPath, keyManager: MockKeyManager(), auditLog: scratchAuditLog())
         try server.start()
         defer { server.listener?.cancel() }
 
