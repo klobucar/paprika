@@ -279,20 +279,24 @@ public class AgentServer {
     ///
     /// Two payload shapes are recognized:
     ///
-    ///   * **SSHSIG** (RFC draft-ietf-curdle-ssh-signature, used by
-    ///     `ssh-keygen -Y sign` and therefore by `git commit -S`).
-    ///     Begins with the ASCII magic `SSHSIG`, followed by a uint32
-    ///     version and a length-prefixed namespace string (`git`,
-    ///     `file`, etc.). We extract the namespace for the prompt.
+    ///   * **SSHSIG** (OpenSSH PROTOCOL.sshsig, used by `ssh-keygen -Y
+    ///     sign` and therefore by `git commit -S`). The signed data is
+    ///     the ASCII magic `SSHSIG` followed by length-prefixed namespace,
+    ///     reserved, hash algorithm, and message hash strings. There is
+    ///     no version field: that only appears in the armored signature
+    ///     file. We extract the namespace (`git`, `file`, etc.).
     ///
     ///   * **SSH publickey auth request** (RFC 4252 §7). The signed
     ///     blob starts with a length-prefixed session identifier, then
     ///     a single byte equal to 50 (`SSH_MSG_USERAUTH_REQUEST`),
     ///     then length-prefixed username, service, method strings.
-    ///     We extract username + service ("user @ service").
+    ///     OpenSSH 8.9+ sends method `publickey-hostbound-v00@openssh.com`
+    ///     instead of `publickey` whenever the server supports it; the
+    ///     leading fields are the same. We extract username + service.
     ///
-    /// Any parse failure falls back to a generic description. Never
-    /// throws — a prompt that says "authorize SSH signing" is a bad
+    /// Client-supplied strings pass through `promptSafe` before they reach
+    /// the dialog. Any parse failure falls back to a generic description.
+    /// Never throws — a prompt that says "authorize SSH signing" is a bad
     /// UX, not a security failure.
     internal static func signContextDescription(for data: Data) -> String {
         // SSHSIG path
@@ -302,7 +306,6 @@ public class AgentServer {
             // SSHReader does subdata(in: 0..<N) which would otherwise
             // trap on a Data.SubSequence whose startIndex is 6.
             var reader = SSHReader(data: Data(data.dropFirst(6)))
-            _ = try? reader.readUInt32() // version
             if let namespace = try? reader.readString(), !namespace.isEmpty {
                 switch namespace {
                 case "git":
@@ -310,7 +313,7 @@ public class AgentServer {
                 case "file":
                     return "Paprika: sign file"
                 default:
-                    return "Paprika: sign \(namespace)"
+                    return "Paprika: sign \(promptSafe(namespace))"
                 }
             }
             return "Paprika: sign SSHSIG request"
@@ -322,11 +325,35 @@ public class AgentServer {
            let msgType = try? reader.readByte(), msgType == 50,      // USERAUTH_REQUEST
            let user = try? reader.readString(),
            let service = try? reader.readString(),
-           let method = try? reader.readString(), method == "publickey" {
-            return "Paprika: SSH auth as \(user) (\(service))"
+           let method = try? reader.readString(),
+           method == "publickey" || method == "publickey-hostbound-v00@openssh.com" {
+            return "Paprika: SSH auth as \(promptSafe(user)) (\(promptSafe(service)))"
         }
 
         return "Paprika: authorize SSH signing"
+    }
+
+    /// Make client-supplied text safe to show in the Touch ID dialog.
+    /// Control, format (bidi overrides, zero-width), and line/paragraph
+    /// separator characters become "?", and long text is cut short, so a
+    /// sign request can't reorder the prompt or push the real context
+    /// out of view.
+    internal static func promptSafe(_ text: String, limit: Int = 64) -> String {
+        var out = String.UnicodeScalarView()
+        for (i, scalar) in text.unicodeScalars.enumerated() {
+            if i == limit {
+                out.append("…")
+                break
+            }
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator,
+                 .surrogate, .privateUse, .unassigned:
+                out.append("?")
+            default:
+                out.append(scalar)
+            }
+        }
+        return String(out)
     }
 
     /// RFC 4251 §5 mpint from an unsigned big-endian magnitude: no

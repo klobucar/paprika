@@ -300,10 +300,10 @@ final class AuditLogTests: XCTestCase {
 
 final class SignContextParserTests: XCTestCase {
     func testSSHSIGGitNamespace() {
-        // SSHSIG magic + version(1) + namespace("git") + reserved("") + ...
+        // SSHSIG signed data: magic + namespace + reserved + hash algo + H(msg).
+        // (No version field; that's only in the armored signature.)
         var blob = SSHWriter()
         blob.writeRaw(Data("SSHSIG".utf8))
-        blob.write(UInt32(1))              // version
         blob.write("git")                  // namespace
         blob.write("")                     // reserved
         blob.write("sha512")               // hash algo
@@ -316,7 +316,6 @@ final class SignContextParserTests: XCTestCase {
     func testSSHSIGFileNamespace() {
         var blob = SSHWriter()
         blob.writeRaw(Data("SSHSIG".utf8))
-        blob.write(UInt32(1))
         blob.write("file")
         blob.write("")
         blob.write("sha512")
